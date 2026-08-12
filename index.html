@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Auditoría gratis de tu ficha de Google Maps | GoodMax</title>
+  <meta name="description" content="Pegá el link de tu ficha de Google Business Profile y descubrí en segundos qué le falta para atraer más clientes." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📍</text></svg>" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- ===== HEADER ===== -->
+  <header class="topbar">
+    <div class="container topbar-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">📍</span>
+        <span class="brand-name">GoodMax</span>
+      </div>
+      <span class="topbar-tag">Auditoría de Google Business Profile</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- ===== HERO / FORM ===== -->
+    <section class="hero">
+      <div class="container hero-inner">
+        <h1>¿Tu ficha de Google Maps está lista para traerte clientes?</h1>
+        <p class="hero-subtitle">
+          Pegá el link de tu negocio en Google Maps y te decimos, en menos de un minuto,
+          qué está bien y qué le está faltando a tu perfil.
+        </p>
+
+        <form id="audit-form" class="audit-form" novalidate>
+          <label for="gmb-url" class="visually-hidden">Link de tu ficha de Google Maps</label>
+          <input
+            type="text"
+            id="gmb-url"
+            name="gmb-url"
+            placeholder="Pegá acá el link de tu ficha de Google Maps…"
+            autocomplete="off"
+            inputmode="url"
+          />
+          <button type="submit" id="audit-btn" class="btn btn-primary">
+            <span class="btn-label">Auditar mi ficha</span>
+          </button>
+        </form>
+        <p id="form-error" class="form-error" role="alert" aria-live="polite"></p>
+
+        <p class="hero-note">
+          Gratis · Sin registro · Resultado inmediato
+        </p>
+      </div>
+    </section>
+
+    <!-- ===== LOADING STATE ===== -->
+    <section id="loading" class="loading-section hidden" aria-live="polite">
+      <div class="container">
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="loading-text">Analizando tu ficha…</p>
+      </div>
+    </section>
+
+    <!-- ===== RESULTS ===== -->
+    <section id="results" class="results-section hidden">
+      <div class="container">
+
+        <div class="results-summary">
+          <div class="score-wrap">
+            <svg class="score-ring" width="140" height="140" viewBox="0 0 140 140" aria-hidden="true">
+              <circle class="score-ring-bg" cx="70" cy="70" r="60" />
+              <circle id="score-ring-fg" class="score-ring-fg" cx="70" cy="70" r="60" />
+            </svg>
+            <div class="score-value">
+              <span id="score-number">0</span><span class="score-percent">%</span>
+            </div>
+          </div>
+          <div class="results-summary-text">
+            <h2 id="results-headline">Resultado de tu auditoría</h2>
+            <p id="results-subheadline">Esto es lo que encontramos en tu ficha.</p>
+            <p id="analyzed-url" class="analyzed-url"></p>
+          </div>
+        </div>
+
+        <ul id="checklist" class="checklist" role="list"></ul>
+
+        <!-- ===== CTA GOODMAX ===== -->
+        <div class="cta-box">
+          <h3>¿Querés que te lo dejemos resuelto?</h3>
+          <p>
+            En GoodMax optimizamos tu ficha de Google para que aparezcas primero
+            y consigas más clientes: fotos, horarios, categoría, web, WhatsApp y
+            publicaciones — todo listo, sin que tengas que ocuparte vos.
+          </p>
+          <a
+            id="whatsapp-cta"
+            class="btn btn-whatsapp"
+            href="https://wa.me/5492610000000?text=Hola%2C%20quiero%20que%20me%20ayuden%20a%20optimizar%20mi%20ficha%20de%20Google%20Business%20Profile"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg class="wa-icon" viewBox="0 0 32 32" aria-hidden="true">
+              <path d="M16.02 3C9.4 3 4 8.4 4 15.02c0 2.35.66 4.53 1.8 6.4L4 29l7.75-1.76a12.9 12.9 0 0 0 4.27.73h.01c6.62 0 12.02-5.4 12.02-12.02C28.05 8.4 22.65 3 16.02 3zm0 21.9h-.01a10 10 0 0 1-5.1-1.4l-.37-.22-4.6 1.04 1.03-4.48-.24-.38a9.9 9.9 0 0 1-1.53-5.44c0-5.48 4.46-9.94 9.95-9.94 2.66 0 5.16 1.03 7.03 2.9a9.87 9.87 0 0 1 2.9 7.02c0 5.48-4.46 9.9-9.06 9.9zm5.44-7.42c-.3-.15-1.76-.87-2.03-.97-.27-.1-.47-.15-.67.15-.2.3-.77.97-.94 1.17-.17.2-.35.22-.65.07-.3-.15-1.24-.46-2.37-1.47-.88-.78-1.47-1.75-1.64-2.05-.17-.3-.02-.46.13-.6.13-.13.3-.35.45-.52.15-.17.2-.3.3-.5.1-.2.05-.37-.02-.52-.07-.15-.67-1.62-.92-2.22-.24-.58-.49-.5-.67-.5-.17 0-.37-.02-.57-.02-.2 0-.52.07-.8.37-.27.3-1.05 1.02-1.05 2.5 0 1.47 1.07 2.9 1.22 3.1.15.2 2.1 3.2 5.09 4.49.71.3 1.27.49 1.7.63.72.23 1.37.2 1.88.12.57-.08 1.76-.72 2.01-1.42.25-.7.25-1.3.17-1.42-.07-.13-.27-.2-.57-.35z"/>
+            </svg>
+            Contactar a GoodMax por WhatsApp
+          </a>
+          <button id="restart-btn" class="btn btn-ghost" type="button">Auditar otra ficha</button>
+        </div>
+
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <p>GoodMax · Optimización de Google Business Profile</p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
