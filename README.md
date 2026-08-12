@@ -35,13 +35,6 @@ formato:
 { id, title, okDesc, failDesc, ok }
 ```
 
-## Pendiente de configuración
-
-- **Número de WhatsApp de GoodMax**: en `index.html`, el botón
-  `#whatsapp-cta` usa un número de ejemplo
-  (`https://wa.me/5492610000000?...`). Hay que reemplazarlo por el número
-  real antes de publicar.
-
 ## Cómo verlo
 
 Abrir `index.html` directamente en el navegador, o servirlo con cualquier
