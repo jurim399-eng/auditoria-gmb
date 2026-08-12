@@ -14,7 +14,7 @@ poder mostrar toda la interfaz funcionando de punta a punta.
 
 ## Cómo se audita cada ficha (por ahora)
 
-Se evalúan 6 puntos:
+Se evalúan 13 puntos:
 
 - Fotos actualizadas
 - Horarios completos
@@ -22,6 +22,13 @@ Se evalúan 6 puntos:
 - Web cargada
 - WhatsApp cargado
 - Publicaciones activas
+- Descripción del negocio completa (con palabras clave del rubro)
+- Servicios o productos cargados
+- Categorías secundarias
+- Área de servicio configurada
+- Atributos del negocio completos (accesibilidad, delivery, retiro en local, etc.)
+- Preguntas y respuestas (si el dueño responde)
+- Reseñas (cantidad y si el negocio responde)
 
 ## Próximo paso: conectar la lectura real
 

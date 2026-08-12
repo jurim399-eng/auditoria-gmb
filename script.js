@@ -54,6 +54,48 @@
       okDesc: "Estás publicando novedades con cierta frecuencia.",
       failDesc: "No hay publicaciones recientes. Las publicaciones activas ayudan a aparecer más arriba en las búsquedas.",
     },
+    {
+      id: "descripcion",
+      title: "Descripción del negocio completa",
+      okDesc: "La descripción está completa y usa palabras clave de tu rubro.",
+      failDesc: "Falta o es muy pobre la descripción. Sin palabras clave del rubro, Google tiene menos pistas para mostrarte en las búsquedas correctas.",
+    },
+    {
+      id: "servicios",
+      title: "Servicios o productos cargados",
+      okDesc: "Tenés cargados los servicios o productos que ofrecés.",
+      failDesc: "No hay servicios ni productos cargados. Es información que ayuda a que el cliente decida contactarte antes de escribir.",
+    },
+    {
+      id: "categorias-secundarias",
+      title: "Categorías secundarias",
+      okDesc: "Además de la principal, sumaste categorías secundarias que amplían tu alcance.",
+      failDesc: "Solo tenés la categoría principal. Sumar categorías secundarias te hace aparecer en más búsquedas relacionadas.",
+    },
+    {
+      id: "area-servicio",
+      title: "Área de servicio configurada",
+      okDesc: "El área donde atendés está bien configurada.",
+      failDesc: "No hay un área de servicio configurada. Si trabajás fuera de tu local (a domicilio, por zona), Google necesita saberlo para mostrarte a esos clientes.",
+    },
+    {
+      id: "atributos",
+      title: "Atributos del negocio completos",
+      okDesc: "Cargaste los atributos relevantes (accesibilidad, delivery, retiro en local, etc.).",
+      failDesc: "Faltan atributos como accesibilidad, delivery o retiro en local. Son filtros que los clientes usan para elegir entre varios negocios.",
+    },
+    {
+      id: "preguntas-respuestas",
+      title: "Preguntas y respuestas",
+      okDesc: "Respondés las preguntas que dejan los usuarios en tu ficha.",
+      failDesc: "Hay preguntas sin responder. Dejarlas así puede llevar a que otro usuario responda mal en tu lugar, o directamente hacer dudar al cliente.",
+    },
+    {
+      id: "resenas",
+      title: "Reseñas",
+      okDesc: "Tenés buen volumen de reseñas y respondés a las que recibís.",
+      failDesc: "Te faltan reseñas o no estás respondiendo las que ya tenés. Responder reseñas (buenas y malas) mejora la confianza y el posicionamiento.",
+    },
   ];
 
   // ---- Referencias al DOM -----------------------------------
