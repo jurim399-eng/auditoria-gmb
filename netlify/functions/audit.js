@@ -71,11 +71,14 @@ exports.handler = async (event) => {
 
   let html;
   let resolvedUrl = url;
+  let httpStatus = null;
   try {
     const result = await fetchMapsPage(url);
     html = result.html;
     resolvedUrl = result.resolvedUrl;
+    httpStatus = result.status;
   } catch (err) {
+    console.error("[audit][fetch-error]", String(err && err.message ? err.message : err));
     return jsonResponse(502, {
       error:
         "No pudimos abrir tu ficha de Google Maps en este intento. Puede ser un bloqueo temporal de Google o un problema de red — probá de nuevo en un rato.",
@@ -83,14 +86,36 @@ exports.handler = async (event) => {
     });
   }
 
-  if (looksBlocked(html)) {
+  const blocked = looksBlocked(html);
+
+  // ---- TEMP DEBUG: sacar este bloque una vez resuelto el diagnóstico ----
+  console.log(
+    "[audit][debug]",
+    JSON.stringify({
+      requestedUrl: url,
+      resolvedUrl,
+      httpStatus,
+      htmlLength: html ? html.length : 0,
+      looksBlocked: blocked,
+      htmlHead500: html ? html.slice(0, 500) : "",
+      htmlTail300: html ? html.slice(-300) : "",
+    })
+  );
+  // ---- FIN TEMP DEBUG (parte 1) ----
+
+  if (blocked) {
     return jsonResponse(502, {
       error:
         "Google bloqueó la lectura automática de tu ficha en este intento (pasa a veces al leer la página pública sin API oficial). Probá de nuevo en unos minutos.",
     });
   }
 
-  const checks = extractChecks(html.slice(0, MAX_HTML_LENGTH));
+  const trimmedHtml = html.slice(0, MAX_HTML_LENGTH);
+  const checks = extractChecks(trimmedHtml);
+
+  // ---- TEMP DEBUG: sacar este bloque una vez resuelto el diagnóstico ----
+  console.log("[audit][debug-extraction]", JSON.stringify(debugExtraction(trimmedHtml)));
+  // ---- FIN TEMP DEBUG (parte 2) ----
 
   return jsonResponse(200, { resolvedUrl, checks });
 };
@@ -114,12 +139,13 @@ async function fetchMapsPage(url) {
       },
     });
 
+    const html = await response.text();
+
     if (!response.ok) {
-      throw new Error("Google respondió con estado " + response.status);
+      throw new Error("Google respondió con estado " + response.status + " — cuerpo: " + html.slice(0, 300));
     }
 
-    const html = await response.text();
-    return { html, resolvedUrl: response.url || url };
+    return { html, resolvedUrl: response.url || url, status: response.status };
   } finally {
     clearTimeout(timeout);
   }
@@ -182,6 +208,44 @@ function extractChecks(html) {
     }),
   };
 }
+
+// ---- TEMP DEBUG: sacar esta función una vez resuelto el diagnóstico ----
+// Repite los mismos cálculos que extractChecks() pero devolviendo los
+// valores crudos (no booleanos) para poder ver en los logs POR QUÉ cada
+// punto dio ok/falta, sin tener que adivinar.
+function debugExtraction(html) {
+  const ogDescription = matchFirst(html, /<meta[^>]+property="og:description"[^>]+content="([^"]*)"/i);
+  const urls = html.match(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'\\<>]*/gi) || [];
+  const googleOwnedDomain =
+    /(google\.|gstatic\.|ggpht\.|googleusercontent\.|goo\.gl|schema\.org|w3\.org|googleapis\.|gmail\.|youtube\.|apple\.com|play\.google)/i;
+  const externalUrls = urls.filter((u) => !googleOwnedDomain.test(u));
+
+  return {
+    ogDescription,
+    photoUrlCount: countMatches(html, /https:\/\/lh\d\.googleusercontent\.com\/p\/[^\s"'\\<>]+/g),
+    timeRangeCount: countMatches(html, /\b\d{1,2}[:.]\d{2}\s?(?:a|-|–)\s?\d{1,2}[:.]\d{2}\b/g),
+    hasHorarioLabel: /Horario de atención/i.test(html),
+    reviewCountMatch: matchFirst(html, /([\d.,]+)\s*(?:reseñas|reviews|opiniones)/i),
+    hasSitioWebLabel: /Sitio web|Website/i.test(html),
+    externalUrlSample: externalUrls.slice(0, 5),
+    hasWhatsappMention: /wa\.me\/|whatsapp/i.test(html),
+    hasLocalPostMarker: /"LocalPost"|Actualizaciones recientes/i.test(html),
+    hasServiciosLabel: /Servicios ofrecidos|Lista de productos|Productos destacados/i.test(html),
+    categoryIdCount: countMatches(html, /"category_id"/g),
+    hasAreaServicioLabel: /Área de servicio|Service area/i.test(html),
+    attributeKeywordHits: [
+      "Accesible en silla de ruedas",
+      "Entrada accesible",
+      "Retiro en el local",
+      "Entrega a domicilio",
+      "Para llevar",
+      "Delivery",
+    ].filter((kw) => html.includes(kw)),
+    hasPreguntasLabel: /Preguntas y respuestas/i.test(html),
+    hasRespuestaDeLabel: /Respuesta de/i.test(html),
+  };
+}
+// ---- FIN TEMP DEBUG ----
 
 function hasExternalWebsite(html) {
   const urls = html.match(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'\\<>]*/gi) || [];
