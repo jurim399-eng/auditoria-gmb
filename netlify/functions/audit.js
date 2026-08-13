@@ -326,18 +326,24 @@ async function querySerpApi({ dataId, query, lat, lng }) {
     );
   }
 
-  const params = new URLSearchParams({ engine: "google_maps", hl: "es", api_key: apiKey });
-
-  if (dataId) {
-    params.set("data_id", dataId);
-  } else if (query) {
-    params.set("q", query);
-    if (lat && lng) params.set("ll", `@${lat},${lng},15z`);
-  } else {
+  // SerpApi exige el parámetro `q` siempre, incluso cuando también le
+  // pasamos `data_id` para apuntar a la ficha exacta — mandamos los dos
+  // juntos cuando los tenemos.
+  if (!query && !dataId) {
     throw new UserError(
       "No pudimos identificar tu ficha a partir de ese link. Probá copiarlo de nuevo desde \"Compartir\" en Google Maps."
     );
   }
+
+  const params = new URLSearchParams({
+    engine: "google_maps",
+    hl: "es",
+    api_key: apiKey,
+    q: query || "ficha de Google Maps",
+  });
+
+  if (dataId) params.set("data_id", dataId);
+  if (lat && lng) params.set("ll", `@${lat},${lng},15z`);
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
