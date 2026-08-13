@@ -38,6 +38,32 @@ Functions gratuitas. Hace falta:
 Sin esa variable configurada, la auditoría devuelve un mensaje de error
 claro en vez de romperse en silencio.
 
+### ⚠️ Estado de la integración con SerpApi (a validar)
+
+Este entorno de desarrollo no tiene salida de red hacia serpapi.com —
+ni para llamar a la API con una key real, ni para leer su documentación
+online. Eso significa que:
+
+- El parámetro `type=place` (que le pide a SerpApi la ficha completa de
+  un negocio puntual, no una lista de resultados de búsqueda) y los
+  nombres de campo que se leen en `buildContext()` (`website`, `hours`,
+  `service_options`, `reviews`, etc.) están basados en documentación
+  recordada, **no verificada en vivo**. Ya hubo un bug real por esto
+  (faltaba `type=place`, y antes faltaba mandar `q` junto con
+  `data_id`) — es decir, esta integración **todavía no se probó de
+  punta a punta con una respuesta real de SerpApi confirmada como
+  correcta**.
+- `buildContext()` prueba varios nombres de campo posibles por dato
+  (ver `firstDefined()`) para no depender de una sola apuesta, pero
+  eso reduce el riesgo, no lo elimina.
+
+**Para cerrar esto de una vez** hace falta un solo JSON real de
+`debug.placeJson` (una auditoría ya hecha, sin gastar una nueva) o, si
+hay margen de créditos, un `debug.placeJson` de una ficha con web,
+horarios y reseñas conocidas para comparar campo por campo contra la
+realidad. Con eso se ajusta `buildContext()` en un solo paso en vez de
+seguir corrigiendo a ciegas.
+
 ### Qué tan confiable es cada punto
 
 | Confiable (campo directo de la API) | Best-effort (depende del rubro del negocio) | No disponible con este proveedor |

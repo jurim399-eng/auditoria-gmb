@@ -337,6 +337,12 @@ async function querySerpApi({ dataId, query, lat, lng }) {
 
   const params = new URLSearchParams({
     engine: "google_maps",
+    // type=place: pedimos la FICHA COMPLETA de un negocio puntual
+    // (con website, horarios, descripción, etc.). Sin esto, SerpApi
+    // devuelve por default una lista de resultados de búsqueda
+    // (tarjetas resumidas, sin la mayoría de estos campos) — que es
+    // lo que estaba pasando antes de este fix.
+    type: "place",
     hl: "es",
     api_key: apiKey,
     q: query || "ficha de Google Maps",
@@ -373,15 +379,39 @@ function extractPlace(serpApiResponse) {
 // las definiciones de CHECK_DEFINITIONS.
 // ---------------------------------------------------------------
 
+// No pudimos confirmar en vivo los nombres exactos de campo que usa
+// SerpApi (este entorno de desarrollo no tiene salida de red hacia
+// serpapi.com). Para no depender de adivinar un solo nombre por dato,
+// probamos varias variantes plausibles por campo — así, si el nombre
+// real no es el primero que se nos ocurrió, igual lo encontramos.
+function firstDefined(obj, keys) {
+  for (const key of keys) {
+    const value = obj[key];
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
 function buildContext(place) {
-  const types = Array.isArray(place.types) ? place.types : place.type ? [place.type] : [];
-  const hours = place.hours || place.operating_hours || null;
-  const hoursDayCount = hours && typeof hours === "object" ? Object.keys(hours).length : 0;
-  const serviceOptions = place.service_options && typeof place.service_options === "object" ? place.service_options : {};
+  const rawTypes = firstDefined(place, ["types", "categories"]);
+  const rawType = firstDefined(place, ["type", "category", "primary_type"]);
+  const types = Array.isArray(rawTypes) ? rawTypes : typeof rawType === "string" ? [rawType] : [];
+
+  const hours = firstDefined(place, ["hours", "operating_hours", "open_hours", "opening_hours"]);
+  const hoursDayCount =
+    hours && typeof hours === "object" && !Array.isArray(hours)
+      ? Object.keys(hours).length
+      : Array.isArray(hours)
+      ? hours.length
+      : 0;
+
+  const serviceOptionsRaw = firstDefined(place, ["service_options", "serviceOptions"]);
+  const serviceOptions = serviceOptionsRaw && typeof serviceOptionsRaw === "object" ? serviceOptionsRaw : {};
   const serviceOptionHits = Object.entries(serviceOptions)
     .filter(([, v]) => v === true)
     .map(([k]) => k);
-  const reviewsRaw = place.reviews;
+
+  const reviewsRaw = firstDefined(place, ["reviews", "review_count", "user_ratings_total", "reviews_count"]);
   const reviews =
     typeof reviewsRaw === "number"
       ? reviewsRaw
@@ -389,13 +419,17 @@ function buildContext(place) {
       ? parseInt(reviewsRaw.replace(/\D/g, ""), 10)
       : null;
 
+  const websiteRaw = firstDefined(place, ["website", "link", "site"]);
+  const descriptionRaw = firstDefined(place, ["description", "about", "editorial_summary"]);
+  const thumbnailRaw = firstDefined(place, ["thumbnail", "photo", "image", "main_image"]);
+
   return {
-    primaryType: typeof place.type === "string" ? place.type : types[0] || "",
+    primaryType: typeof rawType === "string" ? rawType : types[0] || "",
     types,
     hoursDayCount,
-    website: typeof place.website === "string" ? place.website : "",
-    description: typeof place.description === "string" ? place.description : "",
-    thumbnail: typeof place.thumbnail === "string" ? place.thumbnail : "",
+    website: typeof websiteRaw === "string" ? websiteRaw : "",
+    description: typeof descriptionRaw === "string" ? descriptionRaw : "",
+    thumbnail: typeof thumbnailRaw === "string" ? thumbnailRaw : "",
     serviceOptionHits,
     hasMenuOrProducts: Boolean(place.menu || place.products),
     hasServiceArea: Boolean(place.service_area || place.serves_area),
