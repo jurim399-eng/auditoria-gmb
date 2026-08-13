@@ -6,172 +6,162 @@
  * Se llama vía POST /api/audit (redirect definido en netlify.toml
  * hacia /.netlify/functions/audit) con body { url }.
  *
- * Trae el HTML público de esa ficha —sin login, sin API oficial de
- * Google— y aplica heurísticas de texto para estimar cada punto del
- * checklist. Devuelve { resolvedUrl, checks: { <id>: boolean, ... },
- * debug: {...} }, usando los mismos "id" que CHECKLIST_DEFINITION en
- * script.js.
+ * HISTORIAL: la primera versión de esto traía el HTML público de la
+ * ficha y buscaba patrones de texto (og:description, "Horario de
+ * atención", etc.). Con una ficha real esa versión no encontró NADA
+ * — confirmamos con el HTML real que Google Maps no manda ese
+ * contenido como texto plano en la carga inicial, sino adentro de un
+ * bloque de datos interno (APP_INITIALIZATION_STATE) pensado para
+ * que lo parsee el JS del propio Google, no para que lo lea un
+ * tercero. Scrapear eso de forma confiable requeriría un navegador
+ * headless (Puppeteer), que no entra en el límite de tiempo de las
+ * Netlify Functions gratuitas para una sola ficha.
  *
- * El campo `debug` es TEMPORAL, para diagnosticar en pantalla (sección
- * "Ver detalle técnico" en el resultado) por qué cada punto da ok/falta
- * sin tener que ir a buscar los logs de Netlify. Sacarlo (y el bloque
- * de <details> correspondiente en el frontend) una vez resuelto el
- * diagnóstico — ver DEBUG_MODE más abajo.
+ * VERSIÓN ACTUAL: usa SerpApi (https://serpapi.com), un servicio de
+ * terceros que ya resolvió ese problema y expone los datos de una
+ * ficha de Google Maps como JSON estructurado en una sola llamada
+ * HTTP síncrona — encaja bien con el límite de tiempo de Netlify.
+ * Hace falta una cuenta gratis en serpapi.com y cargar la API key
+ * como variable de entorno SERPAPI_KEY en Netlify (Site settings →
+ * Environment variables). El nivel gratis alcanza para auditar
+ * fichas de a una (no para picos de miles).
  *
- * LIMITACIONES CONOCIDAS (léase antes de tocar esto):
- * Google Maps es una app muy dinámica: gran parte de lo que se ve en
- * el navegador (fotos, horarios, posts, preguntas y respuestas,
- * atributos) se termina de cargar con JavaScript después de la carga
- * inicial, o viene de llamadas internas no documentadas de Google. Acá
- * NO ejecutamos JavaScript ni usamos un navegador headless (para que
- * siga siendo gratis y simple) — solo pedimos el HTML inicial y
- * buscamos pistas de texto. Por eso:
+ * Devuelve { resolvedUrl, checks: { <id>: boolean, ... }, debug }
+ * usando los mismos "id" que CHECKLIST_DEFINITION en script.js.
  *
- *   - Categoría, sitio web, descripción y reseñas se detectan
- *     razonablemente bien: esos datos casi siempre están en el HTML
- *     inicial (meta tags, bloque de datos embebido).
- *   - Horarios, atributos y área de servicio son best-effort: buscan
- *     patrones de texto conocidos, pero pueden fallar si Google
- *     cambia el formato de la página.
- *   - WhatsApp, categorías secundarias, publicaciones (posts) y
- *     preguntas y respuestas son los puntos MÁS débiles: esa
- *     información casi nunca está en el HTML inicial (o ni siquiera
- *     es un dato público de Maps, como pasa con WhatsApp), así que en
- *     la mayoría de los casos van a marcar "falta" aunque la ficha sí
- *     los tenga. Es una limitación conocida de leer la página pública
- *     sin un navegador con JS — no de un bug puntual.
+ * QUÉ TAN CONFIABLE ES CADA PUNTO CON SERPAPI (a diferencia del
+ * scraping directo, acá SÍ es JSON estructurado y documentado, pero
+ * ojo: no todos los campos existen para todos los rubros de negocio):
  *
- * Si en algún momento se necesita más precisión, el camino es usar un
- * navegador headless (Puppeteer/Playwright) para que la página se
- * renderice como en un navegador real. Eso ya no entra limpio en el
- * plan gratuito de Netlify Functions tal cual está armado hoy — se
- * evalúa aparte si hace falta.
+ *   - Categoría, categorías secundarias, sitio web, descripción,
+ *     horarios y reseñas: vienen directo de campos de la API
+ *     (type/types, website, description, hours, reviews). Son los
+ *     más confiables.
+ *   - Atributos (delivery / retiro en el local / etc.): vienen de
+ *     `service_options`, que Google solo carga para ciertos rubros
+ *     (gastronomía, sobre todo). Para un electricista o un plomero,
+ *     por ejemplo, puede no venir y el punto va a marcar "falta"
+ *     aunque no aplique realmente.
+ *   - Fotos: solo podemos confirmar "¿hay al menos una foto de
+ *     portada?" (campo `thumbnail`). Cantidad real y si están
+ *     actualizadas NO se puede saber sin una llamada aparte (y paga)
+ *     a la API de fotos de SerpApi.
+ *   - WhatsApp, publicaciones (posts), área de servicio y preguntas
+ *     y respuestas: SerpApi no expone estos datos en la respuesta
+ *     básica de Google Maps (en el caso de WhatsApp, ademas, ni
+ *     siquiera es un campo público real de Maps). Van a marcar
+ *     "falta" casi siempre — limitación conocida, no un bug.
+ *
+ * El campo `debug` es TEMPORAL, para calibrar estos mapeos contra
+ * datos reales sin tener que ir a buscar logs. Se puede apagar
+ * cambiando DEBUG_MODE a false más abajo.
  */
 
-// TEMP: mientras se diagnostica por qué los puntos dan "falta" con
-// fichas reales, mandamos el detalle técnico al frontend. Poner en
-// false (o borrar el campo `debug` de las respuestas) para apagarlo.
 const DEBUG_MODE = true;
 
 const ALLOWED_URL_PATTERN =
   /^https?:\/\/(www\.)?(google\.[a-z.]{2,10}\/maps\/|maps\.app\.goo\.gl\/|goo\.gl\/maps\/)/i;
 
 const FETCH_TIMEOUT_MS = 9000;
-const MAX_HTML_LENGTH = 3_000_000;
+const SERPAPI_ENDPOINT = "https://serpapi.com/search.json";
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-const GOOGLE_OWNED_DOMAIN =
-  /(google\.|gstatic\.|ggpht\.|googleusercontent\.|goo\.gl|schema\.org|w3\.org|googleapis\.|gmail\.|youtube\.|apple\.com|play\.google)/i;
-
-const ATTRIBUTE_KEYWORDS = [
-  "Accesible en silla de ruedas",
-  "Entrada accesible",
-  "Retiro en el local",
-  "Entrega a domicilio",
-  "Para llevar",
-  "Delivery",
-];
+// Errores "esperables" (config faltante, link no identificable, etc.)
+// que queremos mostrar tal cual al usuario, sin genérico "502".
+class UserError extends Error {}
 
 // ---------------------------------------------------------------
-// Definición única de los 13 puntos: cada uno sabe cómo evaluarse
-// (ok) y cómo explicar en criollo qué buscó y qué encontró (detail),
-// a partir del mismo `ctx` calculado una sola vez por auditoría. Así
-// evitamos mantener la misma lógica escrita dos veces en paralelo
-// (una para el resultado real y otra para el debug) y que se
-// desincronicen.
+// Definición única de los 13 puntos: cada uno sabe evaluarse (ok) y
+// explicar en criollo qué campo miró y qué encontró (detail), a
+// partir de un mismo `ctx` armado una sola vez por auditoría.
 // ---------------------------------------------------------------
 const CHECK_DEFINITIONS = [
   {
     id: "fotos",
     title: "Fotos actualizadas",
-    ok: (ctx) => ctx.photoUrlCount >= 20,
+    ok: (ctx) => Boolean(ctx.thumbnail),
     detail: (ctx) =>
-      `Buscamos URLs de fotos con el patrón "lh#.googleusercontent.com/p/...". Encontradas: ${ctx.photoUrlCount} (hace falta 20 o más para marcar "bien").`,
+      `Miramos si la ficha tiene foto de portada (\`thumbnail\`). ${ctx.thumbnail ? "Sí tiene." : "No vino ninguna."} Ojo: con esto no podemos confirmar cuántas fotos hay ni si están actualizadas, solo si hay al menos una.`,
   },
   {
     id: "horarios",
     title: "Horarios completos",
-    ok: (ctx) => ctx.timeRangeCount >= 3 || ctx.hasHorarioLabel,
+    ok: (ctx) => ctx.hoursDayCount >= 5,
     detail: (ctx) =>
-      `Buscamos 3 o más rangos horarios tipo "08:00-20:00" (encontrados: ${ctx.timeRangeCount}) o el texto "Horario de atención" (${ctx.hasHorarioLabel ? "SÍ aparece" : "NO aparece"}).`,
+      `Contamos cuántos días tienen horario cargado en el campo \`hours\`. Encontrados: ${ctx.hoursDayCount} de 7 días (hace falta 5 o más).`,
   },
   {
     id: "categoria",
     title: "Categoría correcta",
-    ok: (ctx) => ctx.ogDescription.length > 0,
+    ok: (ctx) => Boolean(ctx.primaryType),
     detail: (ctx) =>
-      `Buscamos el meta tag <meta property="og:description">. Contenido encontrado: ${ctx.ogDescription ? `"${ctx.ogDescription}"` : "(vacío / no se encontró el meta tag)"}.`,
+      `Categoría principal que devuelve la API: ${ctx.primaryType ? `"${ctx.primaryType}"` : "(no vino ninguna)"}.`,
   },
   {
     id: "web",
     title: "Web cargada",
-    ok: (ctx) => ctx.externalUrls.length > 0 && ctx.hasSitioWebLabel,
-    detail: (ctx) =>
-      `Buscamos el texto "Sitio web"/"Website" (${ctx.hasSitioWebLabel ? "SÍ aparece" : "NO aparece"}) y URLs externas a Google. Encontradas: ${ctx.externalUrls.length}${ctx.externalUrls.length ? ` (ej. ${ctx.externalUrls[0]})` : ""}.`,
+    ok: (ctx) => Boolean(ctx.website),
+    detail: (ctx) => `Campo \`website\`: ${ctx.website ? ctx.website : "(vacío)"}.`,
   },
   {
     id: "whatsapp",
     title: "WhatsApp cargado",
-    ok: (ctx) => ctx.hasWhatsappMention,
-    detail: (ctx) =>
-      `Buscamos "wa.me/" o la palabra "whatsapp" en el HTML. ${ctx.hasWhatsappMention ? "SÍ aparece" : "NO aparece"}. Ojo: Maps no suele exponer esto como campo público, así que este punto casi siempre da "falta" aunque el negocio sí tenga WhatsApp.`,
+    ok: (ctx) => ctx.website.includes("wa.me") || ctx.website.includes("whatsapp"),
+    detail: () =>
+      `Buscamos "wa.me" o "whatsapp" dentro del campo \`website\`. Google Maps no tiene un campo público de WhatsApp propiamente dicho, así que este punto casi siempre va a dar "falta" aunque el negocio sí tenga WhatsApp.`,
   },
   {
     id: "publicaciones",
     title: "Publicaciones activas",
-    ok: (ctx) => ctx.hasLocalPostMarker,
-    detail: (ctx) =>
-      `Buscamos el marcador interno "LocalPost" o el texto "Actualizaciones recientes". ${ctx.hasLocalPostMarker ? "SÍ aparece" : "NO aparece"}. Los posts se cargan con JavaScript después de la carga inicial, así que rara vez están en este HTML.`,
+    ok: () => false,
+    detail: () => `SerpApi no expone publicaciones (posts) en la respuesta básica de Google Maps. No podemos verificar este punto con el proveedor actual.`,
   },
   {
     id: "descripcion",
     title: "Descripción del negocio completa",
-    ok: (ctx) => ctx.ogDescription.length >= 60,
-    detail: (ctx) =>
-      `Mismo meta tag og:description que "Categoría", pero exigiendo 60 caracteres o más. Largo encontrado: ${ctx.ogDescription.length} caracteres.`,
+    ok: (ctx) => ctx.description.length >= 60,
+    detail: (ctx) => `Campo \`description\`, largo: ${ctx.description.length} caracteres (hace falta 60 o más).`,
   },
   {
     id: "servicios",
     title: "Servicios o productos cargados",
-    ok: (ctx) => ctx.hasServiciosLabel,
+    ok: (ctx) => ctx.hasMenuOrProducts,
     detail: (ctx) =>
-      `Buscamos los textos "Servicios ofrecidos", "Lista de productos" o "Productos destacados". ${ctx.hasServiciosLabel ? "SÍ aparece alguno" : "NO aparece ninguno"}. Esta sección suele cargarse con JavaScript.`,
+      `Buscamos un menú o lista de productos en la respuesta (\`menu\`/\`products\`). ${ctx.hasMenuOrProducts ? "Encontramos algo cargado." : "No vino nada."} Este dato no está disponible para todos los rubros.`,
   },
   {
     id: "categorias-secundarias",
     title: "Categorías secundarias",
-    ok: (ctx) => ctx.categoryIdCount > 1,
+    ok: (ctx) => ctx.types.length > 1,
     detail: (ctx) =>
-      `Contamos apariciones de "category_id" en el HTML (proxy indirecto, no es un dato público mostrado tal cual). Encontradas: ${ctx.categoryIdCount} (hace falta más de 1).`,
+      `Campo \`types\` (todas las categorías): ${ctx.types.length ? ctx.types.join(", ") : "(vacío)"} — ${ctx.types.length} en total (hace falta más de 1).`,
   },
   {
     id: "area-servicio",
     title: "Área de servicio configurada",
-    ok: (ctx) => ctx.hasAreaServicioLabel,
-    detail: (ctx) =>
-      `Buscamos el texto "Área de servicio" / "Service area". ${ctx.hasAreaServicioLabel ? "SÍ aparece" : "NO aparece"}.`,
+    ok: (ctx) => ctx.hasServiceArea,
+    detail: () => `SerpApi no expone directamente si hay un "área de servicio" configurada. Best-effort: casi siempre va a dar "falta".`,
   },
   {
     id: "atributos",
     title: "Atributos del negocio completos",
-    ok: (ctx) => ctx.attributeHits.length >= 2,
+    ok: (ctx) => ctx.serviceOptionHits.length >= 2,
     detail: (ctx) =>
-      `Buscamos estas frases exactas: ${ATTRIBUTE_KEYWORDS.map((k) => `"${k}"`).join(", ")}. Encontradas (${ctx.attributeHits.length}): ${ctx.attributeHits.length ? ctx.attributeHits.join(", ") : "ninguna"}. Hacen falta 2 o más.`,
+      `Campo \`service_options\` (delivery / para llevar / servir en el local, etc.). Activos: ${ctx.serviceOptionHits.length ? ctx.serviceOptionHits.join(", ") : "ninguno"}. Google solo carga este campo para algunos rubros (gastronomía sobre todo) — para otros rubros puede no aplicar.`,
   },
   {
     id: "preguntas-respuestas",
     title: "Preguntas y respuestas",
-    ok: (ctx) => ctx.hasPreguntasLabel && ctx.hasRespuestaDeLabel,
-    detail: (ctx) =>
-      `Buscamos el texto "Preguntas y respuestas" (${ctx.hasPreguntasLabel ? "SÍ aparece" : "NO aparece"}) y "Respuesta de" (${ctx.hasRespuestaDeLabel ? "SÍ aparece" : "NO aparece"}). Esta sección se carga con JavaScript, casi nunca está en el HTML inicial.`,
+    ok: () => false,
+    detail: () => `SerpApi no expone preguntas y respuestas en la respuesta básica de Google Maps. No podemos verificar este punto con el proveedor actual.`,
   },
   {
     id: "resenas",
     title: "Reseñas",
-    ok: (ctx) => ctx.reviewCount !== null && ctx.reviewCount >= 5,
+    ok: (ctx) => ctx.reviews !== null && ctx.reviews >= 5,
     detail: (ctx) =>
-      `Buscamos un número seguido de "reseñas"/"reviews"/"opiniones". Encontrado: ${ctx.reviewCountMatch ? `"${ctx.reviewCountMatch}"` : "(no se encontró)"} → ${ctx.reviewCount !== null ? ctx.reviewCount : "sin número"} (hace falta 5 o más).`,
+      `Campo \`reviews\`: ${ctx.reviews !== null ? ctx.reviews : "(no vino)"} (hace falta 5 o más). No podemos verificar automáticamente si el negocio responde a las reseñas.`,
   },
 ];
 
@@ -195,217 +185,215 @@ exports.handler = async (event) => {
     });
   }
 
-  let html;
-  let resolvedUrl = url;
-  let httpStatus = null;
   try {
-    const result = await fetchMapsPage(url);
-    html = result.html;
-    resolvedUrl = result.resolvedUrl;
-    httpStatus = result.status;
-  } catch (err) {
-    const message = String(err && err.message ? err.message : err);
-    console.error("[audit][fetch-error]", message);
-    return jsonResponse(502, {
-      error:
-        "No pudimos abrir tu ficha de Google Maps en este intento. Puede ser un bloqueo temporal de Google o un problema de red — probá de nuevo en un rato.",
-      detail: message,
-      debug: DEBUG_MODE ? { httpStatus: null, htmlLength: 0, htmlHead500: "", fetchError: message, points: [] } : undefined,
-    });
-  }
+    const identifiers = await resolvePlaceIdentifiers(url);
+    const serpApiResponse = await querySerpApi(identifiers);
+    const place = extractPlace(serpApiResponse);
 
-  const blocked = looksBlocked(html);
-  const trimmedHtml = html.slice(0, MAX_HTML_LENGTH);
-
-  if (blocked) {
-    return jsonResponse(502, {
-      error:
-        "Google bloqueó la lectura automática de tu ficha en este intento (pasa a veces al leer la página pública sin API oficial). Probá de nuevo en unos minutos.",
-      debug: DEBUG_MODE
-        ? {
-            httpStatus,
-            htmlLength: html.length,
-            htmlHead500: trimmedHtml.slice(0, 500),
-            looksBlocked: true,
-            points: [],
-            radar: buildRadar(trimmedHtml),
-            rawHtml: trimmedHtml,
-          }
-        : undefined,
-    });
-  }
-
-  const ctx = buildContext(trimmedHtml);
-  const checks = {};
-  const debugPoints = [];
-
-  CHECK_DEFINITIONS.forEach((def) => {
-    const found = safe(() => def.ok(ctx));
-    checks[def.id] = found;
-    if (DEBUG_MODE) {
-      let detail;
-      try {
-        detail = def.detail(ctx);
-      } catch (err) {
-        detail = "(no se pudo generar el detalle: " + String(err && err.message ? err.message : err) + ")";
-      }
-      debugPoints.push({ id: def.id, title: def.title, found, detail });
+    if (!place) {
+      throw new UserError("No encontramos la ficha con ese link. Probá copiarlo de nuevo desde \"Compartir\" en Google Maps.");
     }
-  });
 
-  const responseBody = { resolvedUrl, checks };
+    const ctx = buildContext(place);
+    const checks = {};
+    const debugPoints = [];
 
-  if (DEBUG_MODE) {
-    responseBody.debug = {
-      httpStatus,
-      htmlLength: html.length,
-      htmlHead500: trimmedHtml.slice(0, 500),
-      looksBlocked: false,
-      points: debugPoints,
-      radar: buildRadar(trimmedHtml),
-      rawHtml: trimmedHtml,
-    };
+    CHECK_DEFINITIONS.forEach((def) => {
+      const found = safe(() => def.ok(ctx));
+      checks[def.id] = found;
+      if (DEBUG_MODE) {
+        let detail;
+        try {
+          detail = def.detail(ctx);
+        } catch (err) {
+          detail = "(no se pudo generar el detalle: " + String(err && err.message ? err.message : err) + ")";
+        }
+        debugPoints.push({ id: def.id, title: def.title, found, detail });
+      }
+    });
+
+    const responseBody = { resolvedUrl: identifiers.resolvedUrl, checks };
+
+    if (DEBUG_MODE) {
+      responseBody.debug = {
+        provider: "serpapi",
+        dataId: identifiers.dataId,
+        query: identifiers.query,
+        placeJson: safeJsonPreview(place, 20000),
+        points: debugPoints,
+      };
+    }
+
+    return jsonResponse(200, responseBody);
+  } catch (err) {
+    if (err instanceof UserError) {
+      return jsonResponse(400, { error: err.message });
+    }
+    console.error("[audit][error]", err);
+    return jsonResponse(502, {
+      error:
+        "No pudimos analizar tu ficha en este intento. Puede ser un problema temporal del servicio de lectura — probá de nuevo en un rato.",
+      detail: String(err && err.message ? err.message : err),
+    });
   }
-
-  return jsonResponse(200, responseBody);
 };
 
 // ---------------------------------------------------------------
-// Descarga de la página
+// Paso 1: identificar la ficha a partir del link pegado por el
+// usuario (sin todavía consultar a SerpApi).
 // ---------------------------------------------------------------
 
-async function fetchMapsPage(url) {
+async function resolvePlaceIdentifiers(url) {
+  let workingUrl = url;
+  let resolvedUrl = url;
+
+  // Los links cortos (maps.app.goo.gl, goo.gl/maps) hay que
+  // resolverlos primero para llegar a la URL completa con los datos
+  // de la ficha adentro.
+  const isShortLink = /maps\.app\.goo\.gl|goo\.gl\/maps/i.test(url);
+  if (isShortLink) {
+    resolvedUrl = await resolveRedirect(url);
+    workingUrl = resolvedUrl;
+  }
+
+  // El "CID" de Google (data_id para SerpApi) suele venir en la URL
+  // como !1s0x...:0x... — si está, es la forma más confiable de
+  // identificar la ficha exacta.
+  const dataId = matchFirst(workingUrl, /!1s(0x[0-9a-f]+:0x[0-9a-f]+)/i);
+
+  // Fallback: nombre del negocio + coordenadas, para hacer una
+  // búsqueda si no encontramos el data_id.
+  const coordsMatch = workingUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
+  const nameMatch = workingUrl.match(/\/maps\/place\/([^/@?]+)/i);
+  let query = null;
+  if (nameMatch) {
+    try {
+      query = decodeURIComponent(nameMatch[1].replace(/\+/g, " "));
+    } catch {
+      query = nameMatch[1].replace(/\+/g, " ");
+    }
+  }
+
+  return {
+    resolvedUrl,
+    dataId: dataId || null,
+    lat: coordsMatch ? coordsMatch[1] : null,
+    lng: coordsMatch ? coordsMatch[2] : null,
+    query,
+  };
+}
+
+async function resolveRedirect(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-
   try {
-    const response = await fetch(addLangParam(url), {
+    const response = await fetch(url, {
+      method: "HEAD",
       redirect: "follow",
       signal: controller.signal,
-      headers: {
-        "User-Agent": BROWSER_UA,
-        "Accept-Language": "es-419,es;q=0.9,en;q=0.5",
-        Accept: "text/html,application/xhtml+xml",
-      },
+      headers: { "User-Agent": BROWSER_UA },
     });
-
-    const html = await response.text();
-
-    if (!response.ok) {
-      throw new Error("Google respondió con estado " + response.status + " — cuerpo: " + html.slice(0, 300));
+    return response.url || url;
+  } catch {
+    // Algunos servidores no soportan HEAD bien — reintentamos con GET.
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        signal: controller.signal,
+        headers: { "User-Agent": BROWSER_UA },
+      });
+      return response.url || url;
+    } catch (err) {
+      throw new UserError(
+        "No pudimos abrir ese link corto de Google Maps. Probá pegar el link completo (abrilo en el navegador y copiá la URL de la barra de direcciones)."
+      );
     }
-
-    return { html, resolvedUrl: response.url || url, status: response.status };
   } finally {
     clearTimeout(timeout);
   }
 }
 
-function addLangParam(url) {
+// ---------------------------------------------------------------
+// Paso 2: consultar SerpApi con lo que identificamos en el paso 1.
+// ---------------------------------------------------------------
+
+async function querySerpApi({ dataId, query, lat, lng }) {
+  const apiKey = process.env.SERPAPI_KEY;
+  if (!apiKey) {
+    throw new UserError(
+      "Falta configurar la lectura real de fichas (SERPAPI_KEY) en Netlify. Avisale a quien administra el sitio."
+    );
+  }
+
+  const params = new URLSearchParams({ engine: "google_maps", hl: "es", api_key: apiKey });
+
+  if (dataId) {
+    params.set("data_id", dataId);
+  } else if (query) {
+    params.set("q", query);
+    if (lat && lng) params.set("ll", `@${lat},${lng},15z`);
+  } else {
+    throw new UserError(
+      "No pudimos identificar tu ficha a partir de ese link. Probá copiarlo de nuevo desde \"Compartir\" en Google Maps."
+    );
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const u = new URL(url);
-    if (!u.searchParams.has("hl")) u.searchParams.set("hl", "es");
-    return u.toString();
-  } catch {
-    return url;
+    const response = await fetch(`${SERPAPI_ENDPOINT}?${params.toString()}`, { signal: controller.signal });
+    const json = await response.json();
+    if (json && json.error) {
+      throw new UserError("El servicio de lectura de fichas devolvió un error: " + json.error);
+    }
+    return json;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
-function looksBlocked(html) {
-  if (!html || html.length < 2000) return true;
-  return /(unusual traffic|antes de continuar|consent\.google\.com)/i.test(html);
+function extractPlace(serpApiResponse) {
+  if (!serpApiResponse) return null;
+  if (serpApiResponse.place_results) return serpApiResponse.place_results;
+  if (Array.isArray(serpApiResponse.local_results) && serpApiResponse.local_results.length > 0) {
+    return serpApiResponse.local_results[0];
+  }
+  return null;
 }
 
-// ---- TEMP DEBUG: sacar esto junto con DEBUG_MODE ----------------
-// "Radar" de términos candidatos: para cada uno, si aparece en el
-// HTML real, mostramos el contexto (150 caracteres alrededor) donde
-// aparece. Sirve para ver CON QUÉ FORMATO EXACTO Google guarda cada
-// dato en el HTML real, en vez de seguir adivinando etiquetas de UI
-// que capaz ni están en el HTML inicial.
-const RADAR_TERMS = [
-  "og:description",
-  'name="description"',
-  "application/ld+json",
-  "APP_INITIALIZATION_STATE",
-  "AF_initDataCallback",
-  "<title>",
-  "Horario",
-  "horario",
-  "abierto",
-  "Abierto",
-  "cierra",
-  "lunes",
-  "Lunes",
-  "reseña",
-  "reseñas",
-  "opinion",
-  "opiniones",
-  "★",
-  "rating",
-  "Sitio web",
-  "sitio web",
-  "website",
-  "wa.me",
-  "whatsapp",
-  "WhatsApp",
-  "accesib",
-  "Accesib",
-  "domicilio",
-  "retiro",
-  "para llevar",
-  "delivery",
-  "Delivery",
-  "pregunta",
-  "Pregunta",
-  "publicac",
-  "actualizac",
-  "categor",
-  "rubro",
-  '"phone"',
-  "tel:",
-];
-
-function buildRadar(html) {
-  return RADAR_TERMS.map((term) => {
-    const idx = html.indexOf(term);
-    if (idx === -1) return { term, found: false };
-    const start = Math.max(0, idx - 60);
-    const end = Math.min(html.length, idx + term.length + 90);
-    const context = html.slice(start, end).replace(/\s+/g, " ").trim();
-    return { term, found: true, context };
-  });
-}
-// ---- FIN TEMP DEBUG ----
-
 // ---------------------------------------------------------------
-// Calcula, una sola vez por auditoría, todos los valores crudos que
-// usan las definiciones de CHECK_DEFINITIONS (tanto para decidir
-// ok/falta como para explicar el detalle en el modo debug).
+// Paso 3: pasar el JSON de SerpApi a los valores crudos que usan
+// las definiciones de CHECK_DEFINITIONS.
 // ---------------------------------------------------------------
-function buildContext(html) {
-  const ogDescription = matchFirst(html, /<meta[^>]+property="og:description"[^>]+content="([^"]*)"/i);
-  const urls = html.match(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'\\<>]*/gi) || [];
-  const externalUrls = urls.filter((u) => !GOOGLE_OWNED_DOMAIN.test(u));
-  const reviewCountMatch = matchFirst(html, /([\d.,]+)\s*(?:reseñas|reviews|opiniones)/i);
-  const reviewCount = reviewCountMatch ? parseInt(reviewCountMatch.replace(/[.,]/g, ""), 10) : null;
+
+function buildContext(place) {
+  const types = Array.isArray(place.types) ? place.types : place.type ? [place.type] : [];
+  const hours = place.hours || place.operating_hours || null;
+  const hoursDayCount = hours && typeof hours === "object" ? Object.keys(hours).length : 0;
+  const serviceOptions = place.service_options && typeof place.service_options === "object" ? place.service_options : {};
+  const serviceOptionHits = Object.entries(serviceOptions)
+    .filter(([, v]) => v === true)
+    .map(([k]) => k);
+  const reviewsRaw = place.reviews;
+  const reviews =
+    typeof reviewsRaw === "number"
+      ? reviewsRaw
+      : typeof reviewsRaw === "string"
+      ? parseInt(reviewsRaw.replace(/\D/g, ""), 10)
+      : null;
 
   return {
-    ogDescription,
-    photoUrlCount: countMatches(html, /https:\/\/lh\d\.googleusercontent\.com\/p\/[^\s"'\\<>]+/g),
-    timeRangeCount: countMatches(html, /\b\d{1,2}[:.]\d{2}\s?(?:a|-|–)\s?\d{1,2}[:.]\d{2}\b/g),
-    hasHorarioLabel: /Horario de atención/i.test(html),
-    externalUrls,
-    hasSitioWebLabel: /Sitio web|Website/i.test(html),
-    hasWhatsappMention: /wa\.me\/|whatsapp/i.test(html),
-    hasLocalPostMarker: /"LocalPost"|Actualizaciones recientes/i.test(html),
-    hasServiciosLabel: /Servicios ofrecidos|Lista de productos|Productos destacados/i.test(html),
-    categoryIdCount: countMatches(html, /"category_id"/g),
-    hasAreaServicioLabel: /Área de servicio|Service area/i.test(html),
-    attributeHits: ATTRIBUTE_KEYWORDS.filter((kw) => html.includes(kw)),
-    hasPreguntasLabel: /Preguntas y respuestas/i.test(html),
-    hasRespuestaDeLabel: /Respuesta de/i.test(html),
-    reviewCountMatch,
-    reviewCount: Number.isFinite(reviewCount) ? reviewCount : null,
+    primaryType: typeof place.type === "string" ? place.type : types[0] || "",
+    types,
+    hoursDayCount,
+    website: typeof place.website === "string" ? place.website : "",
+    description: typeof place.description === "string" ? place.description : "",
+    thumbnail: typeof place.thumbnail === "string" ? place.thumbnail : "",
+    serviceOptionHits,
+    hasMenuOrProducts: Boolean(place.menu || place.products),
+    hasServiceArea: Boolean(place.service_area || place.serves_area),
+    reviews: Number.isFinite(reviews) ? reviews : null,
   };
 }
 
@@ -422,9 +410,12 @@ function matchFirst(text, regex) {
   return m ? m[1] : "";
 }
 
-function countMatches(text, regex) {
-  const m = text.match(regex);
-  return m ? m.length : 0;
+function safeJsonPreview(obj, maxLen) {
+  try {
+    return JSON.stringify(obj, null, 2).slice(0, maxLen);
+  } catch {
+    return "(no se pudo serializar)";
+  }
 }
 
 function jsonResponse(statusCode, body) {

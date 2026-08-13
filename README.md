@@ -8,32 +8,55 @@ WhatsApp y una invitación final a contactar a GoodMax.
 ## Estado actual
 
 La auditoría **lee la ficha real de Google Maps** a través de una Netlify
-Function (`netlify/functions/audit.js`): trae el HTML público de la ficha
-que pegó el usuario y aplica heurísticas de texto para estimar cada punto
-del checklist. No usa la API oficial de Google (que es paga) ni un
-navegador headless — por eso es gratis, pero también por eso es **frágil**:
-si Google cambia el diseño de la página, algunas detecciones pueden dejar
-de funcionar hasta que se actualicen los patrones.
+Function (`netlify/functions/audit.js`), usando **SerpApi**
+([serpapi.com](https://serpapi.com)) como proveedor de lectura.
+
+### Por qué SerpApi y no leer el HTML de Google directo
+
+La primera versión de esto traía el HTML público de la ficha y buscaba
+patrones de texto (`og:description`, "Horario de atención", etc.). Al
+probarla con una ficha real, **no encontró nada** — el HTML real de Google
+Maps no manda ese contenido como texto plano en la carga inicial, sino
+adentro de un bloque de datos interno (`APP_INITIALIZATION_STATE`)
+pensado para que lo parsee el JS del propio Google, no un tercero.
+Leerlo de forma confiable requeriría un navegador headless (Puppeteer),
+que no entra en el límite de tiempo de las Netlify Functions gratuitas
+para una sola ficha.
+
+SerpApi ya resolvió ese problema del lado de ellos y devuelve los datos
+de una ficha de Google Maps como JSON estructurado en una sola llamada
+HTTP síncrona — encaja bien con el límite de ~10s de las Netlify
+Functions gratuitas. Hace falta:
+
+1. Una cuenta gratis en [serpapi.com](https://serpapi.com) (alcanza para
+   auditar fichas de a una, no para picos de miles).
+2. Cargar la API key como variable de entorno **`SERPAPI_KEY`** en
+   Netlify: **Site settings → Environment variables**.
+3. Volver a desplegar (o esperar al próximo deploy) para que la function
+   la tome.
+
+Sin esa variable configurada, la auditoría devuelve un mensaje de error
+claro en vez de romperse en silencio.
 
 ### Qué tan confiable es cada punto
 
-| Confiable (suele estar en el HTML inicial) | Best-effort (patrones de texto, puede fallar) | Débil (rara vez está en el HTML inicial o ni siquiera es un dato público) |
+| Confiable (campo directo de la API) | Best-effort (depende del rubro del negocio) | No disponible con este proveedor |
 |---|---|---|
-| Categoría, sitio web, descripción, reseñas | Fotos, horarios, atributos, área de servicio | WhatsApp, categorías secundarias, publicaciones (posts), preguntas y respuestas |
+| Categoría, categorías secundarias, sitio web, descripción, horarios, reseñas | Atributos (`service_options`: delivery/para llevar/etc. — Google solo lo carga para algunos rubros, sobre todo gastronomía) | WhatsApp, publicaciones (posts), área de servicio, preguntas y respuestas, servicios/productos, y "¿hay fotos actualizadas?" (solo se puede confirmar si hay *una* foto de portada, no cantidad ni fecha) |
 
 El detalle punto por punto está documentado en los comentarios de
-`netlify/functions/audit.js`. Dicho en criollo: los puntos de la columna
-"débil" van a marcar "falta" la mayoría de las veces aunque la ficha sí
-los tenga, porque esa info se carga con JavaScript después de la carga
-inicial (o directamente no es un dato que Maps muestre en público). Si en
-algún momento hace falta más precisión, el camino es sumar un navegador
-headless (Puppeteer/Playwright), que ya no entra limpio en el plan
-gratuito de Netlify Functions tal cual está armado hoy.
+`netlify/functions/audit.js` y en el `detail` de cada punto (visible en el
+panel de "Ver detalle técnico" del resultado). Los puntos de la columna
+"no disponible" no son un bug: SerpApi no expone esos datos en la
+respuesta básica de Google Maps (y en el caso de WhatsApp, ni siquiera es
+un campo público real de Maps) — van a marcar "falta" casi siempre.
 
-**Importante:** esto no se probó todavía contra Google Maps en producción
-— se validó con HTML de prueba simulado, porque el entorno donde se
-desarrolló no tiene salida de red hacia google.com. Conviene probarlo con
-fichas reales apenas esté desplegado en Netlify.
+**Importante:** no se pudo probar contra SerpApi en producción desde este
+entorno de desarrollo (no tiene salida de red hacia servicios externos) —
+se validó con respuestas de SerpApi simuladas. Conviene probarlo con
+fichas reales apenas esté la `SERPAPI_KEY` configurada en Netlify, y
+ajustar el mapeo de campos en `buildContext()` de `audit.js` según lo que
+se vea en el panel de detalle técnico.
 
 ## Los 13 puntos que se evalúan
 
@@ -62,11 +85,12 @@ completo con GoodMax. La lógica está en `buildReportText()` en
 ## Detalle técnico (temporal, para diagnóstico)
 
 Mientras estamos ajustando la precisión de la lectura real, cada resultado
-tiene al final una sección colapsable **"Ver detalle técnico"** con:
-status HTTP del fetch a Google, los primeros 500 caracteres del HTML que
-llegó, y para cada uno de los 13 puntos qué patrón/texto buscó y si lo
-encontró. Sirve para diagnosticar directo desde el sitio publicado, sin
-entrar a los logs de Netlify.
+tiene al final una sección colapsable **"Ver detalle técnico"** con: qué
+identificador de Google se usó (`data_id` o búsqueda por nombre), para
+cada uno de los 13 puntos qué campo miramos y qué encontramos, y el JSON
+completo que devolvió SerpApi para esa ficha (con un botón para copiarlo).
+Sirve para diagnosticar directo desde el sitio publicado, sin entrar a
+los logs de Netlify.
 
 Es temporal: el interruptor está en `DEBUG_MODE` (arriba de
 `netlify/functions/audit.js`) — ponerlo en `false` corta el campo `debug`
@@ -106,9 +130,13 @@ pantalla — así el formato de la interfaz no depende de la function.
    - **Build command:** dejar vacío (no hay build, es HTML/CSS/JS puro).
    - **Publish directory:** `.`
    - **Functions directory:** `netlify/functions`
-4. Deploy. Netlify va a redeployar automáticamente con cada push a
+4. Antes (o después) del primer deploy, cargar la variable de entorno
+   **`SERPAPI_KEY`** en **Site settings → Environment variables** (ver
+   sección de arriba) — sin esto la auditoría no va a poder leer fichas
+   reales.
+5. Deploy. Netlify va a redeployar automáticamente con cada push a
    `main`.
-5. Si el sitio venía publicado en GitHub Pages, se puede desactivar en
+6. Si el sitio venía publicado en GitHub Pages, se puede desactivar en
    GitHub → repo → **Settings → Pages** una vez confirmado que Netlify
    funciona.
 
@@ -126,8 +154,12 @@ hay ningún servidor respondiendo `/api/audit`.
 
 ## Pendiente / a evaluar más adelante
 
-- Validar en la práctica, con fichas reales, qué tan seguido Google
-  bloquea o cambia el HTML — y ajustar los patrones de
-  `netlify/functions/audit.js` según lo que se vea.
-- Evaluar si conviene sumar un navegador headless para los puntos
-  "débiles" de la tabla de arriba, si la precisión actual no alcanza.
+- Validar en la práctica, con fichas reales y la `SERPAPI_KEY` puesta,
+  que el mapeo de campos de `buildContext()` en `audit.js` sea correcto
+  — ajustar según lo que muestre el panel de detalle técnico.
+- Evaluar el consumo real contra el nivel gratuito de SerpApi (o el plan
+  pago si hace falta más volumen).
+- Para los puntos "no disponibles" de la tabla de arriba (WhatsApp,
+  posts, preguntas y respuestas, área de servicio), evaluar si vale la
+  pena sumar un navegador headless más adelante, o directamente dejarlos
+  como limitación conocida de la auditoría automática.

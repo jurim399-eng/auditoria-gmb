@@ -250,15 +250,11 @@
     }
 
     const lines = [];
-    lines.push(`Status HTTP del fetch a Google Maps: ${debug.httpStatus ?? "(sin respuesta / error de red)"}`);
-    if (debug.fetchError) lines.push(`Error de red: ${debug.fetchError}`);
-    lines.push(`¿Lo detectamos como página de bloqueo?: ${debug.looksBlocked ? "SÍ" : "NO"}`);
-    lines.push(`Largo total del HTML recibido: ${debug.htmlLength ?? 0} caracteres`);
+    lines.push(`Proveedor de lectura: ${debug.provider || "(desconocido)"}`);
+    lines.push(`Identificador usado (data_id de Google): ${debug.dataId || "(ninguno — se buscó por nombre)"}`);
+    if (debug.query && !debug.dataId) lines.push(`Búsqueda por nombre usada como respaldo: "${debug.query}"`);
     lines.push("");
-    lines.push("--- Primeros 500 caracteres del HTML recibido ---");
-    lines.push(debug.htmlHead500 || "(vacío)");
-    lines.push("");
-    lines.push("--- Detalle por punto (qué buscamos y qué encontramos) ---");
+    lines.push("--- Detalle por punto (qué campo miramos y qué encontramos) ---");
 
     (debug.points || []).forEach((point) => {
       lines.push("");
@@ -266,35 +262,27 @@
       lines.push(point.detail);
     });
 
-    if (debug.radar && debug.radar.length) {
-      lines.push("");
-      lines.push("--- Radar de términos (con qué formato aparece cada uno en el HTML real) ---");
-      debug.radar.forEach((entry) => {
-        if (!entry.found) {
-          lines.push(`✕ "${entry.term}" — no aparece`);
-          return;
-        }
-        lines.push(`✓ "${entry.term}" — contexto: …${entry.context}…`);
-      });
-    }
+    lines.push("");
+    lines.push("--- JSON crudo que devolvió el proveedor para esta ficha ---");
+    lines.push(debug.placeJson || "(vacío)");
 
     debugDetailsContentEl.textContent = lines.join("\n");
     debugDetailsEl.classList.remove("hidden");
   }
 
   async function copyRawHtml() {
-    if (!lastDebugState || !lastDebugState.rawHtml) return;
+    if (!lastDebugState || !lastDebugState.placeJson) return;
 
     let copied = false;
     try {
-      await navigator.clipboard.writeText(lastDebugState.rawHtml);
+      await navigator.clipboard.writeText(lastDebugState.placeJson);
       copied = true;
     } catch {
-      copied = legacyCopyToClipboard(lastDebugState.rawHtml);
+      copied = legacyCopyToClipboard(lastDebugState.placeJson);
     }
 
     copyHtmlFeedback.textContent = copied
-      ? "¡HTML copiado! Ya lo podés pegar donde lo necesites."
+      ? "¡JSON copiado! Ya lo podés pegar donde lo necesites."
       : "No pudimos copiarlo automáticamente.";
   }
 
