@@ -59,6 +59,23 @@ listo para pegar en un chat, y cierra invitando a pedir el diagnóstico
 completo con GoodMax. La lógica está en `buildReportText()` en
 `script.js`.
 
+## Detalle técnico (temporal, para diagnóstico)
+
+Mientras estamos ajustando la precisión de la lectura real, cada resultado
+tiene al final una sección colapsable **"Ver detalle técnico"** con:
+status HTTP del fetch a Google, los primeros 500 caracteres del HTML que
+llegó, y para cada uno de los 13 puntos qué patrón/texto buscó y si lo
+encontró. Sirve para diagnosticar directo desde el sitio publicado, sin
+entrar a los logs de Netlify.
+
+Es temporal: el interruptor está en `DEBUG_MODE` (arriba de
+`netlify/functions/audit.js`) — ponerlo en `false` corta el campo `debug`
+en la respuesta de la function, y con eso la sección deja de aparecer en
+el frontend automáticamente (no hace falta tocar el HTML). Cuando se dé
+de baja del todo, conviene borrar también el bloque `<details
+id="debug-details">` de `index.html` y `renderDebugDetails()` de
+`script.js`.
+
 ## Arquitectura
 
 ```

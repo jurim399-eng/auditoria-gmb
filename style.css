@@ -482,6 +482,53 @@ body {
   margin: 0 auto 24px;
 }
 
+/* ---------- Detalle técnico (debug temporal) ---------- */
+
+.debug-details {
+  margin-top: 24px;
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: 4px 18px;
+}
+
+.debug-details summary {
+  cursor: pointer;
+  padding: 12px 0;
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: var(--color-text-muted);
+  list-style: none;
+}
+
+.debug-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.debug-details summary::before {
+  content: "▸ ";
+}
+
+.debug-details[open] summary::before {
+  content: "▾ ";
+}
+
+.debug-details-content {
+  margin: 0 0 16px;
+  padding: 14px;
+  background: #0f1420;
+  color: #d7dee8;
+  border-radius: var(--radius-sm);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 480px;
+  overflow-y: auto;
+}
+
 /* ---------- Footer ---------- */
 
 .site-footer {

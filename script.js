@@ -121,6 +121,9 @@
   const copyReportFeedback = document.getElementById("copy-report-feedback");
   const whatsappCtaLink = document.getElementById("whatsapp-cta");
 
+  const debugDetailsEl = document.getElementById("debug-details");
+  const debugDetailsContentEl = document.getElementById("debug-details-content");
+
   const RING_CIRCUMFERENCE = 2 * Math.PI * 60; // r = 60 en el SVG
   const AUDIT_ENDPOINT = "/api/audit";
 
@@ -160,14 +163,16 @@
     }
 
     const checks = (data && data.checks) || {};
-    return CHECKLIST_DEFINITION.map((item) => ({
+    const checklist = CHECKLIST_DEFINITION.map((item) => ({
       ...item,
       ok: Boolean(checks[item.id]),
     }));
+
+    return { checklist, debug: (data && data.debug) || null };
   }
 
   // ---- Render de resultados -----------------------------------
-  function renderResults(url, checklist) {
+  function renderResults(url, checklist, debug) {
     checklistEl.innerHTML = "";
 
     checklist.forEach((item) => {
@@ -217,6 +222,43 @@
     analyzedUrlEl.textContent = url;
 
     lastAuditState = { url, checklist, score, okCount, total };
+
+    renderDebugDetails(debug);
+  }
+
+  // ---- Detalle técnico (temporal, para diagnóstico) ------------
+  // Muestra en texto plano lo que devolvió la Netlify Function en
+  // `debug`: status HTTP, primeros 500 caracteres del HTML recibido,
+  // y qué patrón buscó y encontró cada uno de los 13 puntos. Se arma
+  // con textContent (no innerHTML) porque el HTML de Google puede
+  // traer cualquier cosa ahí adentro y no queremos ni interpretarlo
+  // ni que rompa el diseño de la página.
+  function renderDebugDetails(debug) {
+    if (!debug) {
+      debugDetailsEl.classList.add("hidden");
+      debugDetailsContentEl.textContent = "";
+      return;
+    }
+
+    const lines = [];
+    lines.push(`Status HTTP del fetch a Google Maps: ${debug.httpStatus ?? "(sin respuesta / error de red)"}`);
+    if (debug.fetchError) lines.push(`Error de red: ${debug.fetchError}`);
+    lines.push(`¿Lo detectamos como página de bloqueo?: ${debug.looksBlocked ? "SÍ" : "NO"}`);
+    lines.push(`Largo total del HTML recibido: ${debug.htmlLength ?? 0} caracteres`);
+    lines.push("");
+    lines.push("--- Primeros 500 caracteres del HTML recibido ---");
+    lines.push(debug.htmlHead500 || "(vacío)");
+    lines.push("");
+    lines.push("--- Detalle por punto (qué buscamos y qué encontramos) ---");
+
+    (debug.points || []).forEach((point) => {
+      lines.push("");
+      lines.push(`${point.found ? "✅" : "❌"} ${point.title}`);
+      lines.push(point.detail);
+    });
+
+    debugDetailsContentEl.textContent = lines.join("\n");
+    debugDetailsEl.classList.remove("hidden");
   }
 
   // ---- Estados de la interfaz ---------------------------------
@@ -337,8 +379,8 @@
 
     showLoading();
     try {
-      const checklist = await getAuditResult(url);
-      renderResults(url, checklist);
+      const { checklist, debug } = await getAuditResult(url);
+      renderResults(url, checklist, debug);
       showResults();
     } catch (err) {
       loadingSection.classList.add("hidden");

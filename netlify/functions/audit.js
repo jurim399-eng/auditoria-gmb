@@ -8,8 +8,15 @@
  *
  * Trae el HTML público de esa ficha —sin login, sin API oficial de
  * Google— y aplica heurísticas de texto para estimar cada punto del
- * checklist. Devuelve { resolvedUrl, checks: { <id>: boolean, ... } },
- * usando los mismos "id" que CHECKLIST_DEFINITION en script.js.
+ * checklist. Devuelve { resolvedUrl, checks: { <id>: boolean, ... },
+ * debug: {...} }, usando los mismos "id" que CHECKLIST_DEFINITION en
+ * script.js.
+ *
+ * El campo `debug` es TEMPORAL, para diagnosticar en pantalla (sección
+ * "Ver detalle técnico" en el resultado) por qué cada punto da ok/falta
+ * sin tener que ir a buscar los logs de Netlify. Sacarlo (y el bloque
+ * de <details> correspondiente en el frontend) una vez resuelto el
+ * diagnóstico — ver DEBUG_MODE más abajo.
  *
  * LIMITACIONES CONOCIDAS (léase antes de tocar esto):
  * Google Maps es una app muy dinámica: gran parte de lo que se ve en
@@ -41,6 +48,11 @@
  * evalúa aparte si hace falta.
  */
 
+// TEMP: mientras se diagnostica por qué los puntos dan "falta" con
+// fichas reales, mandamos el detalle técnico al frontend. Poner en
+// false (o borrar el campo `debug` de las respuestas) para apagarlo.
+const DEBUG_MODE = true;
+
 const ALLOWED_URL_PATTERN =
   /^https?:\/\/(www\.)?(google\.[a-z.]{2,10}\/maps\/|maps\.app\.goo\.gl\/|goo\.gl\/maps\/)/i;
 
@@ -48,6 +60,120 @@ const FETCH_TIMEOUT_MS = 9000;
 const MAX_HTML_LENGTH = 3_000_000;
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+const GOOGLE_OWNED_DOMAIN =
+  /(google\.|gstatic\.|ggpht\.|googleusercontent\.|goo\.gl|schema\.org|w3\.org|googleapis\.|gmail\.|youtube\.|apple\.com|play\.google)/i;
+
+const ATTRIBUTE_KEYWORDS = [
+  "Accesible en silla de ruedas",
+  "Entrada accesible",
+  "Retiro en el local",
+  "Entrega a domicilio",
+  "Para llevar",
+  "Delivery",
+];
+
+// ---------------------------------------------------------------
+// Definición única de los 13 puntos: cada uno sabe cómo evaluarse
+// (ok) y cómo explicar en criollo qué buscó y qué encontró (detail),
+// a partir del mismo `ctx` calculado una sola vez por auditoría. Así
+// evitamos mantener la misma lógica escrita dos veces en paralelo
+// (una para el resultado real y otra para el debug) y que se
+// desincronicen.
+// ---------------------------------------------------------------
+const CHECK_DEFINITIONS = [
+  {
+    id: "fotos",
+    title: "Fotos actualizadas",
+    ok: (ctx) => ctx.photoUrlCount >= 20,
+    detail: (ctx) =>
+      `Buscamos URLs de fotos con el patrón "lh#.googleusercontent.com/p/...". Encontradas: ${ctx.photoUrlCount} (hace falta 20 o más para marcar "bien").`,
+  },
+  {
+    id: "horarios",
+    title: "Horarios completos",
+    ok: (ctx) => ctx.timeRangeCount >= 3 || ctx.hasHorarioLabel,
+    detail: (ctx) =>
+      `Buscamos 3 o más rangos horarios tipo "08:00-20:00" (encontrados: ${ctx.timeRangeCount}) o el texto "Horario de atención" (${ctx.hasHorarioLabel ? "SÍ aparece" : "NO aparece"}).`,
+  },
+  {
+    id: "categoria",
+    title: "Categoría correcta",
+    ok: (ctx) => ctx.ogDescription.length > 0,
+    detail: (ctx) =>
+      `Buscamos el meta tag <meta property="og:description">. Contenido encontrado: ${ctx.ogDescription ? `"${ctx.ogDescription}"` : "(vacío / no se encontró el meta tag)"}.`,
+  },
+  {
+    id: "web",
+    title: "Web cargada",
+    ok: (ctx) => ctx.externalUrls.length > 0 && ctx.hasSitioWebLabel,
+    detail: (ctx) =>
+      `Buscamos el texto "Sitio web"/"Website" (${ctx.hasSitioWebLabel ? "SÍ aparece" : "NO aparece"}) y URLs externas a Google. Encontradas: ${ctx.externalUrls.length}${ctx.externalUrls.length ? ` (ej. ${ctx.externalUrls[0]})` : ""}.`,
+  },
+  {
+    id: "whatsapp",
+    title: "WhatsApp cargado",
+    ok: (ctx) => ctx.hasWhatsappMention,
+    detail: (ctx) =>
+      `Buscamos "wa.me/" o la palabra "whatsapp" en el HTML. ${ctx.hasWhatsappMention ? "SÍ aparece" : "NO aparece"}. Ojo: Maps no suele exponer esto como campo público, así que este punto casi siempre da "falta" aunque el negocio sí tenga WhatsApp.`,
+  },
+  {
+    id: "publicaciones",
+    title: "Publicaciones activas",
+    ok: (ctx) => ctx.hasLocalPostMarker,
+    detail: (ctx) =>
+      `Buscamos el marcador interno "LocalPost" o el texto "Actualizaciones recientes". ${ctx.hasLocalPostMarker ? "SÍ aparece" : "NO aparece"}. Los posts se cargan con JavaScript después de la carga inicial, así que rara vez están en este HTML.`,
+  },
+  {
+    id: "descripcion",
+    title: "Descripción del negocio completa",
+    ok: (ctx) => ctx.ogDescription.length >= 60,
+    detail: (ctx) =>
+      `Mismo meta tag og:description que "Categoría", pero exigiendo 60 caracteres o más. Largo encontrado: ${ctx.ogDescription.length} caracteres.`,
+  },
+  {
+    id: "servicios",
+    title: "Servicios o productos cargados",
+    ok: (ctx) => ctx.hasServiciosLabel,
+    detail: (ctx) =>
+      `Buscamos los textos "Servicios ofrecidos", "Lista de productos" o "Productos destacados". ${ctx.hasServiciosLabel ? "SÍ aparece alguno" : "NO aparece ninguno"}. Esta sección suele cargarse con JavaScript.`,
+  },
+  {
+    id: "categorias-secundarias",
+    title: "Categorías secundarias",
+    ok: (ctx) => ctx.categoryIdCount > 1,
+    detail: (ctx) =>
+      `Contamos apariciones de "category_id" en el HTML (proxy indirecto, no es un dato público mostrado tal cual). Encontradas: ${ctx.categoryIdCount} (hace falta más de 1).`,
+  },
+  {
+    id: "area-servicio",
+    title: "Área de servicio configurada",
+    ok: (ctx) => ctx.hasAreaServicioLabel,
+    detail: (ctx) =>
+      `Buscamos el texto "Área de servicio" / "Service area". ${ctx.hasAreaServicioLabel ? "SÍ aparece" : "NO aparece"}.`,
+  },
+  {
+    id: "atributos",
+    title: "Atributos del negocio completos",
+    ok: (ctx) => ctx.attributeHits.length >= 2,
+    detail: (ctx) =>
+      `Buscamos estas frases exactas: ${ATTRIBUTE_KEYWORDS.map((k) => `"${k}"`).join(", ")}. Encontradas (${ctx.attributeHits.length}): ${ctx.attributeHits.length ? ctx.attributeHits.join(", ") : "ninguna"}. Hacen falta 2 o más.`,
+  },
+  {
+    id: "preguntas-respuestas",
+    title: "Preguntas y respuestas",
+    ok: (ctx) => ctx.hasPreguntasLabel && ctx.hasRespuestaDeLabel,
+    detail: (ctx) =>
+      `Buscamos el texto "Preguntas y respuestas" (${ctx.hasPreguntasLabel ? "SÍ aparece" : "NO aparece"}) y "Respuesta de" (${ctx.hasRespuestaDeLabel ? "SÍ aparece" : "NO aparece"}). Esta sección se carga con JavaScript, casi nunca está en el HTML inicial.`,
+  },
+  {
+    id: "resenas",
+    title: "Reseñas",
+    ok: (ctx) => ctx.reviewCount !== null && ctx.reviewCount >= 5,
+    detail: (ctx) =>
+      `Buscamos un número seguido de "reseñas"/"reviews"/"opiniones". Encontrado: ${ctx.reviewCountMatch ? `"${ctx.reviewCountMatch}"` : "(no se encontró)"} → ${ctx.reviewCount !== null ? ctx.reviewCount : "sin número"} (hace falta 5 o más).`,
+  },
+];
 
 exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
@@ -78,46 +204,66 @@ exports.handler = async (event) => {
     resolvedUrl = result.resolvedUrl;
     httpStatus = result.status;
   } catch (err) {
-    console.error("[audit][fetch-error]", String(err && err.message ? err.message : err));
+    const message = String(err && err.message ? err.message : err);
+    console.error("[audit][fetch-error]", message);
     return jsonResponse(502, {
       error:
         "No pudimos abrir tu ficha de Google Maps en este intento. Puede ser un bloqueo temporal de Google o un problema de red — probá de nuevo en un rato.",
-      detail: String(err && err.message ? err.message : err),
+      detail: message,
+      debug: DEBUG_MODE ? { httpStatus: null, htmlLength: 0, htmlHead500: "", fetchError: message, points: [] } : undefined,
     });
   }
 
   const blocked = looksBlocked(html);
-
-  // ---- TEMP DEBUG: sacar este bloque una vez resuelto el diagnóstico ----
-  console.log(
-    "[audit][debug]",
-    JSON.stringify({
-      requestedUrl: url,
-      resolvedUrl,
-      httpStatus,
-      htmlLength: html ? html.length : 0,
-      looksBlocked: blocked,
-      htmlHead500: html ? html.slice(0, 500) : "",
-      htmlTail300: html ? html.slice(-300) : "",
-    })
-  );
-  // ---- FIN TEMP DEBUG (parte 1) ----
+  const trimmedHtml = html.slice(0, MAX_HTML_LENGTH);
 
   if (blocked) {
     return jsonResponse(502, {
       error:
         "Google bloqueó la lectura automática de tu ficha en este intento (pasa a veces al leer la página pública sin API oficial). Probá de nuevo en unos minutos.",
+      debug: DEBUG_MODE
+        ? {
+            httpStatus,
+            htmlLength: html.length,
+            htmlHead500: trimmedHtml.slice(0, 500),
+            looksBlocked: true,
+            points: [],
+          }
+        : undefined,
     });
   }
 
-  const trimmedHtml = html.slice(0, MAX_HTML_LENGTH);
-  const checks = extractChecks(trimmedHtml);
+  const ctx = buildContext(trimmedHtml);
+  const checks = {};
+  const debugPoints = [];
 
-  // ---- TEMP DEBUG: sacar este bloque una vez resuelto el diagnóstico ----
-  console.log("[audit][debug-extraction]", JSON.stringify(debugExtraction(trimmedHtml)));
-  // ---- FIN TEMP DEBUG (parte 2) ----
+  CHECK_DEFINITIONS.forEach((def) => {
+    const found = safe(() => def.ok(ctx));
+    checks[def.id] = found;
+    if (DEBUG_MODE) {
+      let detail;
+      try {
+        detail = def.detail(ctx);
+      } catch (err) {
+        detail = "(no se pudo generar el detalle: " + String(err && err.message ? err.message : err) + ")";
+      }
+      debugPoints.push({ id: def.id, title: def.title, found, detail });
+    }
+  });
 
-  return jsonResponse(200, { resolvedUrl, checks });
+  const responseBody = { resolvedUrl, checks };
+
+  if (DEBUG_MODE) {
+    responseBody.debug = {
+      httpStatus,
+      htmlLength: html.length,
+      htmlHead500: trimmedHtml.slice(0, 500),
+      looksBlocked: false,
+      points: debugPoints,
+    };
+  }
+
+  return jsonResponse(200, responseBody);
 };
 
 // ---------------------------------------------------------------
@@ -167,92 +313,35 @@ function looksBlocked(html) {
 }
 
 // ---------------------------------------------------------------
-// Extracción de cada punto del checklist a partir del HTML público.
-// Cada extractor está protegido con safe(): si uno falla, no tira
-// abajo el resto del análisis, simplemente queda en "falta".
+// Calcula, una sola vez por auditoría, todos los valores crudos que
+// usan las definiciones de CHECK_DEFINITIONS (tanto para decidir
+// ok/falta como para explicar el detalle en el modo debug).
 // ---------------------------------------------------------------
-
-function extractChecks(html) {
-  const ogDescription = matchFirst(html, /<meta[^>]+property="og:description"[^>]+content="([^"]*)"/i);
-  const photoUrlCount = countMatches(html, /https:\/\/lh\d\.googleusercontent\.com\/p\/[^\s"'\\<>]+/g);
-  const timeRangeCount = countMatches(html, /\b\d{1,2}[:.]\d{2}\s?(?:a|-|–)\s?\d{1,2}[:.]\d{2}\b/g);
-  const reviewCountMatch = matchFirst(html, /([\d.,]+)\s*(?:reseñas|reviews|opiniones)/i);
-
-  const attributeKeywords = [
-    "Accesible en silla de ruedas",
-    "Entrada accesible",
-    "Retiro en el local",
-    "Entrega a domicilio",
-    "Para llevar",
-    "Delivery",
-  ];
-  const attributeHits = attributeKeywords.filter((kw) => html.includes(kw)).length;
-
-  return {
-    fotos: safe(() => photoUrlCount >= 20),
-    horarios: safe(() => timeRangeCount >= 3 || /Horario de atención/i.test(html)),
-    categoria: safe(() => ogDescription.length > 0),
-    web: safe(() => hasExternalWebsite(html)),
-    whatsapp: safe(() => /wa\.me\/|whatsapp/i.test(html)),
-    publicaciones: safe(() => /"LocalPost"|Actualizaciones recientes/i.test(html)),
-    descripcion: safe(() => ogDescription.length >= 60),
-    servicios: safe(() => /Servicios ofrecidos|Lista de productos|Productos destacados/i.test(html)),
-    "categorias-secundarias": safe(() => countMatches(html, /"category_id"/g) > 1),
-    "area-servicio": safe(() => /Área de servicio|Service area/i.test(html)),
-    atributos: safe(() => attributeHits >= 2),
-    "preguntas-respuestas": safe(() => /Preguntas y respuestas/i.test(html) && /Respuesta de/i.test(html)),
-    resenas: safe(() => {
-      if (!reviewCountMatch) return false;
-      const n = parseInt(reviewCountMatch.replace(/[.,]/g, ""), 10);
-      return Number.isFinite(n) && n >= 5;
-    }),
-  };
-}
-
-// ---- TEMP DEBUG: sacar esta función una vez resuelto el diagnóstico ----
-// Repite los mismos cálculos que extractChecks() pero devolviendo los
-// valores crudos (no booleanos) para poder ver en los logs POR QUÉ cada
-// punto dio ok/falta, sin tener que adivinar.
-function debugExtraction(html) {
+function buildContext(html) {
   const ogDescription = matchFirst(html, /<meta[^>]+property="og:description"[^>]+content="([^"]*)"/i);
   const urls = html.match(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'\\<>]*/gi) || [];
-  const googleOwnedDomain =
-    /(google\.|gstatic\.|ggpht\.|googleusercontent\.|goo\.gl|schema\.org|w3\.org|googleapis\.|gmail\.|youtube\.|apple\.com|play\.google)/i;
-  const externalUrls = urls.filter((u) => !googleOwnedDomain.test(u));
+  const externalUrls = urls.filter((u) => !GOOGLE_OWNED_DOMAIN.test(u));
+  const reviewCountMatch = matchFirst(html, /([\d.,]+)\s*(?:reseñas|reviews|opiniones)/i);
+  const reviewCount = reviewCountMatch ? parseInt(reviewCountMatch.replace(/[.,]/g, ""), 10) : null;
 
   return {
     ogDescription,
     photoUrlCount: countMatches(html, /https:\/\/lh\d\.googleusercontent\.com\/p\/[^\s"'\\<>]+/g),
     timeRangeCount: countMatches(html, /\b\d{1,2}[:.]\d{2}\s?(?:a|-|–)\s?\d{1,2}[:.]\d{2}\b/g),
     hasHorarioLabel: /Horario de atención/i.test(html),
-    reviewCountMatch: matchFirst(html, /([\d.,]+)\s*(?:reseñas|reviews|opiniones)/i),
+    externalUrls,
     hasSitioWebLabel: /Sitio web|Website/i.test(html),
-    externalUrlSample: externalUrls.slice(0, 5),
     hasWhatsappMention: /wa\.me\/|whatsapp/i.test(html),
     hasLocalPostMarker: /"LocalPost"|Actualizaciones recientes/i.test(html),
     hasServiciosLabel: /Servicios ofrecidos|Lista de productos|Productos destacados/i.test(html),
     categoryIdCount: countMatches(html, /"category_id"/g),
     hasAreaServicioLabel: /Área de servicio|Service area/i.test(html),
-    attributeKeywordHits: [
-      "Accesible en silla de ruedas",
-      "Entrada accesible",
-      "Retiro en el local",
-      "Entrega a domicilio",
-      "Para llevar",
-      "Delivery",
-    ].filter((kw) => html.includes(kw)),
+    attributeHits: ATTRIBUTE_KEYWORDS.filter((kw) => html.includes(kw)),
     hasPreguntasLabel: /Preguntas y respuestas/i.test(html),
     hasRespuestaDeLabel: /Respuesta de/i.test(html),
+    reviewCountMatch,
+    reviewCount: Number.isFinite(reviewCount) ? reviewCount : null,
   };
-}
-// ---- FIN TEMP DEBUG ----
-
-function hasExternalWebsite(html) {
-  const urls = html.match(/https?:\/\/[a-z0-9.-]+\.[a-z]{2,}[^\s"'\\<>]*/gi) || [];
-  const googleOwnedDomain =
-    /(google\.|gstatic\.|ggpht\.|googleusercontent\.|goo\.gl|schema\.org|w3\.org|googleapis\.|gmail\.|youtube\.|apple\.com|play\.google)/i;
-  const external = urls.filter((u) => !googleOwnedDomain.test(u));
-  return external.length > 0 && /Sitio web|Website/i.test(html);
 }
 
 function safe(fn) {
