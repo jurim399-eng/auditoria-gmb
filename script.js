@@ -123,6 +123,8 @@
 
   const debugDetailsEl = document.getElementById("debug-details");
   const debugDetailsContentEl = document.getElementById("debug-details-content");
+  const copyHtmlBtn = document.getElementById("copy-html-btn");
+  const copyHtmlFeedback = document.getElementById("copy-html-feedback");
 
   const RING_CIRCUMFERENCE = 2 * Math.PI * 60; // r = 60 en el SVG
   const AUDIT_ENDPOINT = "/api/audit";
@@ -130,6 +132,11 @@
   // Se completa después de cada auditoría exitosa, para poder armar
   // el informe copiable sin tener que recalcular nada.
   let lastAuditState = null;
+
+  // Guarda el último `debug` recibido (incluye el HTML crudo completo)
+  // para el botón "Copiar HTML completo". Es aparte de lastAuditState
+  // porque es un dato de diagnóstico, no del resultado en sí.
+  let lastDebugState = null;
 
   // ---- Validación básica del link ---------------------------
   function isLikelyGoogleMapsUrl(value) {
@@ -234,6 +241,8 @@
   // traer cualquier cosa ahí adentro y no queremos ni interpretarlo
   // ni que rompa el diseño de la página.
   function renderDebugDetails(debug) {
+    lastDebugState = debug;
+
     if (!debug) {
       debugDetailsEl.classList.add("hidden");
       debugDetailsContentEl.textContent = "";
@@ -257,8 +266,36 @@
       lines.push(point.detail);
     });
 
+    if (debug.radar && debug.radar.length) {
+      lines.push("");
+      lines.push("--- Radar de términos (con qué formato aparece cada uno en el HTML real) ---");
+      debug.radar.forEach((entry) => {
+        if (!entry.found) {
+          lines.push(`✕ "${entry.term}" — no aparece`);
+          return;
+        }
+        lines.push(`✓ "${entry.term}" — contexto: …${entry.context}…`);
+      });
+    }
+
     debugDetailsContentEl.textContent = lines.join("\n");
     debugDetailsEl.classList.remove("hidden");
+  }
+
+  async function copyRawHtml() {
+    if (!lastDebugState || !lastDebugState.rawHtml) return;
+
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(lastDebugState.rawHtml);
+      copied = true;
+    } catch {
+      copied = legacyCopyToClipboard(lastDebugState.rawHtml);
+    }
+
+    copyHtmlFeedback.textContent = copied
+      ? "¡HTML copiado! Ya lo podés pegar donde lo necesites."
+      : "No pudimos copiarlo automáticamente.";
   }
 
   // ---- Estados de la interfaz ---------------------------------
@@ -406,4 +443,5 @@
   });
 
   copyReportBtn.addEventListener("click", copyReport);
+  copyHtmlBtn.addEventListener("click", copyRawHtml);
 })();

@@ -228,6 +228,8 @@ exports.handler = async (event) => {
             htmlHead500: trimmedHtml.slice(0, 500),
             looksBlocked: true,
             points: [],
+            radar: buildRadar(trimmedHtml),
+            rawHtml: trimmedHtml,
           }
         : undefined,
     });
@@ -260,6 +262,8 @@ exports.handler = async (event) => {
       htmlHead500: trimmedHtml.slice(0, 500),
       looksBlocked: false,
       points: debugPoints,
+      radar: buildRadar(trimmedHtml),
+      rawHtml: trimmedHtml,
     };
   }
 
@@ -311,6 +315,67 @@ function looksBlocked(html) {
   if (!html || html.length < 2000) return true;
   return /(unusual traffic|antes de continuar|consent\.google\.com)/i.test(html);
 }
+
+// ---- TEMP DEBUG: sacar esto junto con DEBUG_MODE ----------------
+// "Radar" de términos candidatos: para cada uno, si aparece en el
+// HTML real, mostramos el contexto (150 caracteres alrededor) donde
+// aparece. Sirve para ver CON QUÉ FORMATO EXACTO Google guarda cada
+// dato en el HTML real, en vez de seguir adivinando etiquetas de UI
+// que capaz ni están en el HTML inicial.
+const RADAR_TERMS = [
+  "og:description",
+  'name="description"',
+  "application/ld+json",
+  "APP_INITIALIZATION_STATE",
+  "AF_initDataCallback",
+  "<title>",
+  "Horario",
+  "horario",
+  "abierto",
+  "Abierto",
+  "cierra",
+  "lunes",
+  "Lunes",
+  "reseña",
+  "reseñas",
+  "opinion",
+  "opiniones",
+  "★",
+  "rating",
+  "Sitio web",
+  "sitio web",
+  "website",
+  "wa.me",
+  "whatsapp",
+  "WhatsApp",
+  "accesib",
+  "Accesib",
+  "domicilio",
+  "retiro",
+  "para llevar",
+  "delivery",
+  "Delivery",
+  "pregunta",
+  "Pregunta",
+  "publicac",
+  "actualizac",
+  "categor",
+  "rubro",
+  '"phone"',
+  "tel:",
+];
+
+function buildRadar(html) {
+  return RADAR_TERMS.map((term) => {
+    const idx = html.indexOf(term);
+    if (idx === -1) return { term, found: false };
+    const start = Math.max(0, idx - 60);
+    const end = Math.min(html.length, idx + term.length + 90);
+    const context = html.slice(start, end).replace(/\s+/g, " ").trim();
+    return { term, found: true, context };
+  });
+}
+// ---- FIN TEMP DEBUG ----
 
 // ---------------------------------------------------------------
 // Calcula, una sola vez por auditoría, todos los valores crudos que
