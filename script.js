@@ -1,15 +1,17 @@
 /* =========================================================
    Auditoría GMB · GoodMax
    -----------------------------------------------------------
-   Por ahora esto es SOLO diseño y estructura: no hay lectura
-   real de la ficha de Google Maps todavía. `runMockAudit()`
-   genera un resultado simulado (pero estable para el mismo
-   link) para poder mostrar la interfaz completa.
+   La auditoría lee la ficha real de Google Maps a través de la
+   Netlify Function en /api/audit (ver netlify/functions/audit.js).
+   Esa function trae el HTML público de la ficha y devuelve, para
+   cada punto del checklist, si lo detectó o no: { checks: { <id>:
+   boolean, ... } }. Acá solo pedimos ese resultado y lo cruzamos
+   con CHECKLIST_DEFINITION (que tiene los títulos y textos).
 
-   Cuando conectemos la lectura real, el único lugar que hay
-   que tocar es `getAuditResult()`: reemplazar la llamada a
-   `runMockAudit()` por la consulta real (API / scraping /
-   backend propio) que devuelva el mismo formato de datos.
+   Como es lectura de la página pública sin API oficial, puede
+   fallar o quedar desactualizada si Google cambia el diseño de la
+   página — el detalle de qué tan confiable es cada punto está
+   documentado en netlify/functions/audit.js.
    ========================================================= */
 
 (function () {
@@ -115,8 +117,16 @@
   const resultsSubheadline = document.getElementById("results-subheadline");
 
   const restartBtn = document.getElementById("restart-btn");
+  const copyReportBtn = document.getElementById("copy-report-btn");
+  const copyReportFeedback = document.getElementById("copy-report-feedback");
+  const whatsappCtaLink = document.getElementById("whatsapp-cta");
 
   const RING_CIRCUMFERENCE = 2 * Math.PI * 60; // r = 60 en el SVG
+  const AUDIT_ENDPOINT = "/api/audit";
+
+  // Se completa después de cada auditoría exitosa, para poder armar
+  // el informe copiable sin tener que recalcular nada.
+  let lastAuditState = null;
 
   // ---- Validación básica del link ---------------------------
   function isLikelyGoogleMapsUrl(value) {
@@ -126,41 +136,34 @@
     return /google\.[a-z.]+\/maps|maps\.app\.goo\.gl|goo\.gl\/maps/i.test(trimmed);
   }
 
-  // ---- Generador pseudo-aleatorio con semilla ---------------
-  // Así el mismo link siempre da el mismo resultado simulado
-  // (más creíble para una demo que puro azar cada vez).
-  function seededRandom(seed) {
-    let h = 0;
-    for (let i = 0; i < seed.length; i++) {
-      h = (Math.imul(31, h) + seed.charCodeAt(i)) | 0;
-    }
-    return function () {
-      h = (Math.imul(h ^ (h >>> 15), 2246822519) + 0x6d2b79f5) | 0;
-      let t = h ^ (h >>> 15);
-      t = Math.imul(t, 1 | t);
-      t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-    };
-  }
+  // ---- Lectura real de la ficha (Netlify Function) ------------
+  // La function busca el HTML público de la ficha y devuelve qué
+  // puntos detectó. Acá solo cruzamos ese resultado con
+  // CHECKLIST_DEFINITION para tener título + texto + ok por punto.
+  async function getAuditResult(url) {
+    const response = await fetch(AUDIT_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
 
-  // ---- Auditoría simulada (placeholder) ----------------------
-  function runMockAudit(url) {
-    const rand = seededRandom(url.trim().toLowerCase());
+    let data = null;
+    try {
+      data = await response.json();
+    } catch {
+      // el servidor no devolvió JSON (por ej. la function no está desplegada)
+    }
+
+    if (!response.ok) {
+      const message = data && data.error ? data.error : "No pudimos analizar la ficha. Probá de nuevo en un momento.";
+      throw new Error(message);
+    }
+
+    const checks = (data && data.checks) || {};
     return CHECKLIST_DEFINITION.map((item) => ({
       ...item,
-      ok: rand() > 0.45, // ~55% de probabilidad de que "falte" cada punto
+      ok: Boolean(checks[item.id]),
     }));
-  }
-
-  // ---- Punto único de integración futura ---------------------
-  // Reemplazar el cuerpo de esta función por la lectura real
-  // (API de Google, backend propio, etc.) manteniendo el mismo
-  // formato de retorno: array de { id, title, okDesc, failDesc, ok }
-  async function getAuditResult(url) {
-    // Simulamos una pequeña demora de "análisis" para que la
-    // interfaz de carga tenga sentido.
-    await new Promise((resolve) => setTimeout(resolve, 1400));
-    return runMockAudit(url);
   }
 
   // ---- Render de resultados -----------------------------------
@@ -212,6 +215,8 @@
     }
 
     analyzedUrlEl.textContent = url;
+
+    lastAuditState = { url, checklist, score, okCount, total };
   }
 
   // ---- Estados de la interfaz ---------------------------------
@@ -235,6 +240,81 @@
     formError.textContent = message;
     input.classList.add("input-error");
     input.focus();
+  }
+
+  // ---- Informe copiable (texto plano, listo para WhatsApp) ----
+  function buildReportText(state) {
+    const { url, checklist, score, okCount, total } = state;
+    const whatsappLink = whatsappCtaLink ? whatsappCtaLink.href.split("?")[0] : "";
+
+    const lines = [];
+    lines.push("📍 *Diagnóstico de tu ficha de Google Maps*");
+    if (url) lines.push(url);
+    lines.push("");
+    lines.push(`Resultado: ${score}% — cumple ${okCount} de ${total} puntos clave`);
+    lines.push("");
+
+    checklist.forEach((item) => {
+      const icon = item.ok ? "✅" : "❌";
+      const estado = item.ok ? "" : " (te falta)";
+      lines.push(`${icon} ${item.title}${estado}`);
+      lines.push(item.ok ? item.okDesc : item.failDesc);
+      lines.push("");
+    });
+
+    lines.push("—");
+    lines.push(
+      "Este diagnóstico lo armó automáticamente la herramienta de GoodMax, así que puede tener algún margen de error."
+    );
+    lines.push(
+      "Si querés el diagnóstico completo y de yapa te dejamos la ficha optimizada, escribinos por WhatsApp y lo vemos juntos 👇"
+    );
+    if (whatsappLink) lines.push(whatsappLink);
+
+    return lines.join("\n");
+  }
+
+  async function copyReport() {
+    if (!lastAuditState) return;
+    const text = buildReportText(lastAuditState);
+
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      copied = legacyCopyToClipboard(text);
+    }
+
+    copyReportFeedback.textContent = copied
+      ? "¡Informe copiado! Ya lo podés pegar en WhatsApp."
+      : "No pudimos copiarlo automáticamente. Seleccioná el texto a mano.";
+
+    if (copied) {
+      const originalLabel = copyReportBtn.textContent;
+      copyReportBtn.textContent = "✓ Copiado";
+      setTimeout(() => {
+        copyReportBtn.textContent = originalLabel;
+      }, 2000);
+    }
+  }
+
+  function legacyCopyToClipboard(text) {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    let success = false;
+    try {
+      success = document.execCommand("copy");
+    } catch {
+      success = false;
+    }
+    document.body.removeChild(textarea);
+    return success;
   }
 
   // ---- Eventos ---------------------------------------------------
@@ -264,7 +344,8 @@
       loadingSection.classList.add("hidden");
       auditBtn.disabled = false;
       auditBtn.querySelector(".btn-label").textContent = "Auditar mi ficha";
-      showError("No pudimos analizar la ficha. Probá de nuevo en un momento.");
+      const message = err && err.message ? err.message : "No pudimos analizar la ficha. Probá de nuevo en un momento.";
+      showError(message);
     }
   });
 
@@ -281,4 +362,6 @@
     input.focus();
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
+
+  copyReportBtn.addEventListener("click", copyReport);
 })();
