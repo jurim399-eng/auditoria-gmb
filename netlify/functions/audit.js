@@ -217,7 +217,8 @@ exports.handler = async (event) => {
     if (DEBUG_MODE) {
       responseBody.debug = {
         provider: "serpapi",
-        dataId: identifiers.dataId,
+        cidPair: identifiers.cidPair,
+        identifierUsed: identifiers.dataParam ? "data" : identifiers.dataCid ? "data_cid" : "búsqueda por nombre",
         query: identifiers.query,
         placeJson: safeJsonPreview(place, 20000),
         points: debugPoints,
@@ -256,13 +257,42 @@ async function resolvePlaceIdentifiers(url) {
     workingUrl = resolvedUrl;
   }
 
-  // El "CID" de Google (data_id para SerpApi) suele venir en la URL
-  // como !1s0x...:0x... — si está, es la forma más confiable de
-  // identificar la ficha exacta.
-  const dataId = matchFirst(workingUrl, /!1s(0x[0-9a-f]+:0x[0-9a-f]+)/i);
+  // Google Maps identifica cada ficha con un CID en formato
+  // "0x<feature>:0x<cid>" que aparece en la URL como !1s0x...:0x...
+  // SerpApi (según su propio mensaje de error, confirmado probando
+  // en el sitio real) NO acepta ese par tal cual — acepta uno de
+  // estos tres: `data`, `place_id` o `data_cid`. La forma más directa
+  // y menos propensa a errores es pasarle el bloque `data=...` de la
+  // URL tal cual viene (sin reinterpretarlo); como respaldo, también
+  // calculamos `data_cid` (el segundo hex convertido a decimal, que
+  // es el formato que Google llama "CID" en otros contextos, ej. la
+  // URL corta google.com/maps?cid=...).
+  const cidPairMatch = workingUrl.match(/!1s(0x[0-9a-f]+):(0x[0-9a-f]+)/i);
+  const cidPair = cidPairMatch ? `${cidPairMatch[1]}:${cidPairMatch[2]}` : null;
+  let dataCid = null;
+  if (cidPairMatch) {
+    try {
+      dataCid = BigInt(cidPairMatch[2]).toString();
+    } catch {
+      dataCid = null;
+    }
+  }
+
+  // Ojo: en las URLs reales de Maps "data=" es parte del PATH
+  // (.../17z/data=!3m1!...), no un parámetro de query string — puede
+  // venir precedido de "/", no solo de "?" o "&".
+  const dataParamMatch = workingUrl.match(/[/?&]data=([^?&]+)/i);
+  let dataParam = null;
+  if (dataParamMatch) {
+    try {
+      dataParam = decodeURIComponent(dataParamMatch[1]);
+    } catch {
+      dataParam = dataParamMatch[1];
+    }
+  }
 
   // Fallback: nombre del negocio + coordenadas, para hacer una
-  // búsqueda si no encontramos el data_id.
+  // búsqueda si no encontramos ningún identificador de arriba.
   const coordsMatch = workingUrl.match(/@(-?\d+\.\d+),(-?\d+\.\d+)/);
   const nameMatch = workingUrl.match(/\/maps\/place\/([^/@?]+)/i);
   let query = null;
@@ -276,7 +306,9 @@ async function resolvePlaceIdentifiers(url) {
 
   return {
     resolvedUrl,
-    dataId: dataId || null,
+    cidPair: cidPair || null, // solo para mostrar en el debug, no se manda a SerpApi
+    dataParam,
+    dataCid,
     lat: coordsMatch ? coordsMatch[1] : null,
     lng: coordsMatch ? coordsMatch[2] : null,
     query,
@@ -318,7 +350,7 @@ async function resolveRedirect(url) {
 // Paso 2: consultar SerpApi con lo que identificamos en el paso 1.
 // ---------------------------------------------------------------
 
-async function querySerpApi({ dataId, query, lat, lng }) {
+async function querySerpApi({ dataParam, dataCid, query, lat, lng }) {
   const apiKey = process.env.SERPAPI_KEY;
   if (!apiKey) {
     throw new UserError(
@@ -326,10 +358,9 @@ async function querySerpApi({ dataId, query, lat, lng }) {
     );
   }
 
-  // SerpApi exige el parámetro `q` siempre, incluso cuando también le
-  // pasamos `data_id` para apuntar a la ficha exacta — mandamos los dos
-  // juntos cuando los tenemos.
-  if (!query && !dataId) {
+  const hasPlaceIdentifier = Boolean(dataParam || dataCid);
+
+  if (!query && !hasPlaceIdentifier) {
     throw new UserError(
       "No pudimos identificar tu ficha a partir de ese link. Probá copiarlo de nuevo desde \"Compartir\" en Google Maps."
     );
@@ -337,18 +368,27 @@ async function querySerpApi({ dataId, query, lat, lng }) {
 
   const params = new URLSearchParams({
     engine: "google_maps",
-    // type=place: pedimos la FICHA COMPLETA de un negocio puntual
-    // (con website, horarios, descripción, etc.). Sin esto, SerpApi
-    // devuelve por default una lista de resultados de búsqueda
-    // (tarjetas resumidas, sin la mayoría de estos campos) — que es
-    // lo que estaba pasando antes de este fix.
-    type: "place",
     hl: "es",
     api_key: apiKey,
     q: query || "ficha de Google Maps",
   });
 
-  if (dataId) params.set("data_id", dataId);
+  // type=place: pedimos la FICHA COMPLETA de un negocio puntual (con
+  // website, horarios, descripción, etc.), no una lista de resultados
+  // de búsqueda. Pero type=place exige identificar la ficha con uno
+  // de estos parámetros (confirmado por el propio mensaje de error de
+  // SerpApi): `data`, `place_id` o `data_cid`. Si no tenemos ninguno
+  // (link sin datos de ubicación, solo nombre), no podemos pedir
+  // type=place — hacemos una búsqueda normal y nos quedamos con el
+  // primer resultado, que va a traer menos campos.
+  if (dataParam) {
+    params.set("type", "place");
+    params.set("data", dataParam);
+  } else if (dataCid) {
+    params.set("type", "place");
+    params.set("data_cid", dataCid);
+  }
+
   if (lat && lng) params.set("ll", `@${lat},${lng},15z`);
 
   const controller = new AbortController();

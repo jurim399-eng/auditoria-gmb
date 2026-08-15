@@ -251,8 +251,9 @@
 
     const lines = [];
     lines.push(`Proveedor de lectura: ${debug.provider || "(desconocido)"}`);
-    lines.push(`Identificador usado (data_id de Google): ${debug.dataId || "(ninguno — se buscó por nombre)"}`);
-    if (debug.query && !debug.dataId) lines.push(`Búsqueda por nombre usada como respaldo: "${debug.query}"`);
+    lines.push(`Cómo identificamos la ficha: ${debug.identifierUsed || "(desconocido)"}`);
+    if (debug.cidPair) lines.push(`CID de Google detectado en el link: ${debug.cidPair}`);
+    if (debug.query) lines.push(`Nombre usado para la búsqueda: "${debug.query}"`);
     lines.push("");
     lines.push("--- Detalle por punto (qué campo miramos y qué encontramos) ---");
 

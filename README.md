@@ -42,20 +42,20 @@ claro en vez de romperse en silencio.
 
 Este entorno de desarrollo no tiene salida de red hacia serpapi.com —
 ni para llamar a la API con una key real, ni para leer su documentación
-online. Eso significa que:
+online. Se fueron encontrando bugs reales en varias vueltas, cada una
+confirmada por el propio mensaje de error que devolvió SerpApi (no
+adivinados): primero faltaba mandar `q` junto con el identificador de
+la ficha, después faltaba `type=place` para pedir la ficha completa (sin
+eso, SerpApi devuelve una lista de resultados de búsqueda), y el nombre
+de parámetro para identificar la ficha (`data`, con `data_cid` como
+respaldo) también se corrigió a partir de un mensaje de error real.
 
-- El parámetro `type=place` (que le pide a SerpApi la ficha completa de
-  un negocio puntual, no una lista de resultados de búsqueda) y los
-  nombres de campo que se leen en `buildContext()` (`website`, `hours`,
-  `service_options`, `reviews`, etc.) están basados en documentación
-  recordada, **no verificada en vivo**. Ya hubo un bug real por esto
-  (faltaba `type=place`, y antes faltaba mandar `q` junto con
-  `data_id`) — es decir, esta integración **todavía no se probó de
-  punta a punta con una respuesta real de SerpApi confirmada como
-  correcta**.
-- `buildContext()` prueba varios nombres de campo posibles por dato
-  (ver `firstDefined()`) para no depender de una sola apuesta, pero
-  eso reduce el riesgo, no lo elimina.
+Lo que **todavía no está confirmado** con una respuesta real y exitosa
+de SerpApi son los nombres de campo *adentro* de la ficha que lee
+`buildContext()` (`website`, `hours`, `service_options`, `reviews`,
+etc.) — siguen basados en documentación recordada. `buildContext()`
+prueba varios nombres posibles por dato (ver `firstDefined()`) para no
+depender de una sola apuesta, pero eso reduce el riesgo, no lo elimina.
 
 **Para cerrar esto de una vez** hace falta un solo JSON real de
 `debug.placeJson` (una auditoría ya hecha, sin gastar una nueva) o, si
