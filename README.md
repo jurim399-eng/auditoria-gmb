@@ -7,33 +7,47 @@ WhatsApp y una invitación final a contactar a GoodMax.
 
 ## Estado actual
 
-La auditoría **lee la ficha real de Google Maps** a través de una Netlify
-Function (`netlify/functions/audit.js`): trae el HTML público de la ficha
-que pegó el usuario y aplica heurísticas de texto para estimar cada punto
-del checklist. No usa la API oficial de Google (que es paga) ni un
-navegador headless — por eso es gratis, pero también por eso es **frágil**:
-si Google cambia el diseño de la página, algunas detecciones pueden dejar
-de funcionar hasta que se actualicen los patrones.
+La auditoría lee la ficha real de Google Maps a través de una Netlify
+Function (`netlify/functions/audit.js`), con dos fuentes de datos posibles
+por auditoría (se elige sola, en este orden):
+
+1. **SerpApi** (`engine=google_maps`, `place_results`) — si el sitio tiene
+   configurada la variable de entorno `SERPAPI_KEY` en Netlify y se pudo
+   identificar el lugar (place_id o data_id + coordenadas) a partir del
+   link que pegó el usuario. Es la fuente confiable: los datos vienen
+   estructurados de la API paga de SerpApi, no dependen de que Google no
+   nos bloquee ni de parsear texto suelto.
+2. **HTML público** (fallback) — si no hay `SERPAPI_KEY`, no se pudo
+   identificar el lugar, o la llamada a SerpApi falla. Trae el HTML
+   público de la ficha y aplica heurísticas de texto para estimar cada
+   punto. No usa navegador headless — por eso es gratis, pero también por
+   eso es **frágil**: si Google cambia el diseño de la página, algunas
+   detecciones pueden dejar de funcionar hasta que se actualicen los
+   patrones.
+
+`debug.dataSource` en la respuesta de la function dice `"serpapi"` o
+`"html"` según qué camino se usó en cada auditoría — es el primer dato a
+mirar para confirmar que `SERPAPI_KEY` está andando.
 
 ### Qué tan confiable es cada punto
 
-| Confiable (suele estar en el HTML inicial) | Best-effort (patrones de texto, puede fallar) | Débil (rara vez está en el HTML inicial o ni siquiera es un dato público) |
+| Confiable (con SerpApi o en el HTML inicial) | Best-effort (patrones de texto, solo en modo HTML) | No disponible (ni Maps ni SerpApi lo exponen como dato público) |
 |---|---|---|
-| Categoría, sitio web, descripción, reseñas | Fotos, horarios, atributos, área de servicio | WhatsApp, categorías secundarias, publicaciones (posts), preguntas y respuestas |
+| Categoría, categorías secundarias, sitio web, descripción, reseñas, servicios/menú, atributos | Fotos, horarios (en modo HTML son best-effort; con SerpApi son más confiables) | WhatsApp, publicaciones (posts), área de servicio, preguntas y respuestas |
 
-El detalle punto por punto está documentado en los comentarios de
-`netlify/functions/audit.js`. Dicho en criollo: los puntos de la columna
-"débil" van a marcar "falta" la mayoría de las veces aunque la ficha sí
-los tenga, porque esa info se carga con JavaScript después de la carga
-inicial (o directamente no es un dato que Maps muestre en público). Si en
-algún momento hace falta más precisión, el camino es sumar un navegador
-headless (Puppeteer/Playwright), que ya no entra limpio en el plan
-gratuito de Netlify Functions tal cual está armado hoy.
+El detalle punto por punto (qué campo de `place_results` o qué patrón de
+texto busca cada uno, según la fuente) está documentado en los comentarios
+de `netlify/functions/audit.js`, junto a cada `CHECK_DEFINITIONS`. Los 4
+puntos de la columna "no disponible" van a marcar "falta" siempre, con
+cualquiera de las dos fuentes — no es un bug, es que ni la API paga de
+SerpApi ni el HTML público de Maps exponen esos datos.
 
-**Importante:** esto no se probó todavía contra Google Maps en producción
-— se validó con HTML de prueba simulado, porque el entorno donde se
-desarrolló no tiene salida de red hacia google.com. Conviene probarlo con
-fichas reales apenas esté desplegado en Netlify.
+**Importante:** el modo SerpApi no se probó todavía en producción — el
+entorno donde se desarrolló no tiene salida de red hacia `serpapi.com`, así
+que el parseo de `place_results` se validó offline contra el ejemplo de la
+documentación oficial de SerpApi, pero no con una llamada real. Conviene
+probarlo con fichas reales apenas esté desplegado en Netlify y revisar
+`debug.dataSource` / `debug.serpApiError` en el resultado.
 
 ## Los 13 puntos que se evalúan
 
@@ -126,8 +140,13 @@ hay ningún servidor respondiendo `/api/audit`.
 
 ## Pendiente / a evaluar más adelante
 
+- Probar el modo SerpApi con fichas reales en producción (ver
+  `debug.dataSource` / `debug.serpApiError`) y ajustar el mapeo de campos
+  si algo no viene como se esperaba.
 - Validar en la práctica, con fichas reales, qué tan seguido Google
-  bloquea o cambia el HTML — y ajustar los patrones de
+  bloquea o cambia el HTML del modo fallback — y ajustar los patrones de
   `netlify/functions/audit.js` según lo que se vea.
-- Evaluar si conviene sumar un navegador headless para los puntos
-  "débiles" de la tabla de arriba, si la precisión actual no alcanza.
+- Evaluar si conviene pedir también `engine=google_maps_photos` para
+  tener el conteo real de fotos (hoy, con SerpApi, "fotos actualizadas" es
+  un proxy por cantidad de categorías, no el total real — cuesta un
+  crédito extra de SerpApi por auditoría).
