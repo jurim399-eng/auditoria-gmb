@@ -433,9 +433,25 @@ function firstDefined(obj, keys) {
 }
 
 function buildContext(place) {
-  const rawTypes = firstDefined(place, ["types", "categories"]);
+  // OJO (confirmado con una respuesta real de SerpApi): el campo
+  // `type` viene como ARRAY con TODAS las categorías de la ficha
+  // (ej. `type: ["Instalador de gas"]`), no como string suelto — y
+  // SerpApi no manda ningún campo separado `types`/`categories` con
+  // la lista completa. Antes asumíamos lo contrario (que `type` era
+  // un string y `types`/`categories` la lista), así que con una
+  // ficha real esto siempre daba "categoría vacía" aunque la API sí
+  // trajera la categoría. Probamos primero el array (`type`/`types`/
+  // `categories`, sea cual sea el que venga como array) y, si no hay
+  // ninguno, contemplamos el caso de que sea un string suelto.
+  const rawTypes = firstDefined(place, ["type", "types", "categories"]);
   const rawType = firstDefined(place, ["type", "category", "primary_type"]);
-  const types = Array.isArray(rawTypes) ? rawTypes : typeof rawType === "string" ? [rawType] : [];
+  const types = Array.isArray(rawTypes)
+    ? rawTypes
+    : Array.isArray(rawType)
+    ? rawType
+    : typeof rawType === "string"
+    ? [rawType]
+    : [];
 
   const hours = firstDefined(place, ["hours", "operating_hours", "open_hours", "opening_hours"]);
   const hoursDayCount =
@@ -464,7 +480,7 @@ function buildContext(place) {
   const thumbnailRaw = firstDefined(place, ["thumbnail", "photo", "image", "main_image"]);
 
   return {
-    primaryType: typeof rawType === "string" ? rawType : types[0] || "",
+    primaryType: types[0] || "",
     types,
     hoursDayCount,
     website: typeof websiteRaw === "string" ? websiteRaw : "",
