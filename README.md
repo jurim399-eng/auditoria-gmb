@@ -66,39 +66,75 @@ seguir corrigiendo a ciegas.
 
 ### Qué tan confiable es cada punto
 
-| Confiable (campo directo de la API) | Best-effort (depende del rubro del negocio) | No disponible con este proveedor |
+| Confiable (campo directo de la API) | Best-effort (depende del rubro, o de heurística propia arriba del campo) | No disponible con este proveedor |
 |---|---|---|
-| Categoría, categorías secundarias, sitio web, descripción, horarios, reseñas | Atributos (`service_options`: delivery/para llevar/etc. — Google solo lo carga para algunos rubros, sobre todo gastronomía) | WhatsApp, publicaciones (posts), área de servicio, preguntas y respuestas, servicios/productos, y "¿hay fotos actualizadas?" (solo se puede confirmar si hay *una* foto de portada, no cantidad ni fecha) |
+| Sitio web (una vez que hay URL), reseñas | Horarios, categoría, descripción, categorías secundarias, atributos (`service_options` solo lo carga Google para algunos rubros, sobre todo gastronomía) | WhatsApp, publicaciones (posts), área de servicio, preguntas y respuestas, y fotos (SerpApi en el plan gratis solo da `thumbnail`: sí/no hay foto de portada, sin fecha ni cantidad — no alcanza para evaluar "actualizadas") |
 
 El detalle punto por punto está documentado en los comentarios de
 `netlify/functions/audit.js` y en el `detail` de cada punto (visible en el
 panel de "Ver detalle técnico" del resultado). Los puntos de la columna
 "no disponible" no son un bug: SerpApi no expone esos datos en la
 respuesta básica de Google Maps (y en el caso de WhatsApp, ni siquiera es
-un campo público real de Maps) — van a marcar "falta" casi siempre.
+un campo público real de Maps) — se sacaron del checklist en vez de
+dejarlos marcando "falta" casi siempre sin que fuera una auditoría real.
+
+**Categoría** y **Web** además hacen trabajo extra sobre el campo de la
+API, no se conforman con que "exista":
+
+- **Categoría**: `type` puede no estar vacío pero igual ser una
+  categoría "cajón de sastre" que Google usa cuando nadie configuró una
+  específica (`GENERIC_CATEGORY_NAMES` en `audit.js`) — en ese caso
+  marca "mal". Si el usuario completa el campo opcional "Rubro de tu
+  negocio" en el formulario, además exige que `type` coincida
+  razonablemente con ese rubro (comparación por palabra, tolera
+  variaciones como plomería/plomero).
+- **Web**: además de que `website` no esté vacío, se hace un fetch
+  aparte (no a SerpApi) contra esa URL para confirmar que responde —
+  un link a un sitio caído ya no cuenta como "web cargada". Trade-off
+  aceptado: más latencia (hasta `WEBSITE_FETCH_TIMEOUT_MS`, 4.5s) y
+  riesgo de falso negativo si ese sitio bloquea peticiones automáticas.
 
 **Importante:** no se pudo probar contra SerpApi en producción desde este
 entorno de desarrollo (no tiene salida de red hacia servicios externos) —
-se validó con respuestas de SerpApi simuladas. Conviene probarlo con
-fichas reales apenas esté la `SERPAPI_KEY` configurada en Netlify, y
+se validó con respuestas de SerpApi simuladas, incluyendo los criterios
+nuevos de categoría/web/horarios/descripción/reseñas. Conviene probarlo
+con fichas reales apenas esté la `SERPAPI_KEY` configurada en Netlify, y
 ajustar el mapeo de campos en `buildContext()` de `audit.js` según lo que
-se vea en el panel de detalle técnico.
+se vea en el panel de detalle técnico — en particular la forma real del
+campo `hours` (de la que depende la detección de "abierto 24 horas").
 
-## Los 13 puntos que se evalúan
+## El campo "rubro" (opcional)
 
-- Fotos actualizadas
-- Horarios completos
-- Categoría correcta
-- Web cargada
-- WhatsApp cargado
-- Publicaciones activas
-- Descripción del negocio completa (con palabras clave del rubro)
+El formulario tiene un campo opcional, "Rubro de tu negocio", que viaja
+como `rubro` en el `POST /api/audit`. Lo usan dos checks:
+
+- **categoria**: si se completa, exige que la categoría (`type`)
+  coincida con ese rubro (si no coincide, marca "mal" aunque `type` sea
+  específico y no genérico). Vacío, el check solo evalúa que haya una
+  categoría específica cargada, sin poder confirmar que sea *la
+  correcta* para ese rubro.
+- **horarios**: se usa junto con `type` para decidir si el rubro es de
+  los que justifican "abierto las 24 horas" (cerrajería, grúa,
+  emergencias médicas, hotelería, etc. — ver `EMERGENCY_RUBRO_PATTERNS`
+  en `audit.js`).
+
+## Los 8 puntos que se evalúan
+
+- Horarios completos (y sin "abierto 24 horas" sospechoso fuera de rubros de emergencia)
+- Categoría correcta (no genérica, y coincide con el rubro declarado si se completó)
+- Web cargada (y confirmamos que responde)
+- Descripción del negocio completa (largo mínimo y sin señales de spam/relleno)
 - Servicios o productos cargados
-- Categorías secundarias
-- Área de servicio configurada
+- Categorías secundarias (principal + 2 o más secundarias)
 - Atributos del negocio completos (accesibilidad, delivery, retiro en local, etc.)
-- Preguntas y respuestas (si el dueño responde)
-- Reseñas (cantidad y si el negocio responde)
+- Reseñas (más de 30, con promedio de 4.2 o más)
+
+**Se sacaron del checklist** (versión original tenía 13 puntos, esta
+tiene 8): fotos, WhatsApp, publicaciones (posts), área de servicio y
+preguntas y respuestas — sin dato confiable detrás con el proveedor
+actual (ver tabla de arriba). Se reincorporan si en algún momento se paga
+la llamada aparte a la API de fotos de SerpApi, o se suma otra fuente de
+datos para el resto.
 
 ## Informe copiable
 
@@ -113,7 +149,7 @@ completo con GoodMax. La lógica está en `buildReportText()` en
 Mientras estamos ajustando la precisión de la lectura real, cada resultado
 tiene al final una sección colapsable **"Ver detalle técnico"** con: qué
 identificador de Google se usó (`data_id` o búsqueda por nombre), para
-cada uno de los 13 puntos qué campo miramos y qué encontramos, y el JSON
+cada uno de los 8 puntos qué campo miramos y qué encontramos, y el JSON
 completo que devolvió SerpApi para esa ficha (con un botón para copiarlo).
 Sirve para diagnosticar directo desde el sitio publicado, sin entrar a
 los logs de Netlify.
@@ -134,12 +170,12 @@ netlify/functions/audit.js           → Netlify Function (lee Maps y devuelve e
 netlify.toml                         → config de Netlify (publish dir, functions dir, redirect /api/*)
 ```
 
-El frontend llama a `POST /api/audit` con `{ url }`. Netlify redirige eso
-a la function real (`/.netlify/functions/audit`, ver `netlify.toml`). La
-function devuelve:
+El frontend llama a `POST /api/audit` con `{ url, rubro }` (`rubro` puede
+ir vacío). Netlify redirige eso a la function real
+(`/.netlify/functions/audit`, ver `netlify.toml`). La function devuelve:
 
 ```json
-{ "resolvedUrl": "...", "checks": { "fotos": true, "horarios": false, ... } }
+{ "resolvedUrl": "...", "checks": { "horarios": true, "categoria": false, ... } }
 ```
 
 `script.js` cruza ese `checks` con `CHECKLIST_DEFINITION` (que tiene los
@@ -182,10 +218,15 @@ hay ningún servidor respondiendo `/api/audit`.
 
 - Validar en la práctica, con fichas reales y la `SERPAPI_KEY` puesta,
   que el mapeo de campos de `buildContext()` en `audit.js` sea correcto
-  — ajustar según lo que muestre el panel de detalle técnico.
+  — ajustar según lo que muestre el panel de detalle técnico. En
+  particular: confirmar la forma real de `hours` (de la que depende
+  `hasOpen24h`) y si `rating` es el nombre de campo correcto para el
+  promedio de reseñas.
 - Evaluar el consumo real contra el nivel gratuito de SerpApi (o el plan
-  pago si hace falta más volumen).
+  pago si hace falta más volumen, o si se quiere sumar la llamada a la
+  API de fotos para poder reincorporar ese check).
 - Para los puntos "no disponibles" de la tabla de arriba (WhatsApp,
-  posts, preguntas y respuestas, área de servicio), evaluar si vale la
-  pena sumar un navegador headless más adelante, o directamente dejarlos
-  como limitación conocida de la auditoría automática.
+  posts, preguntas y respuestas, área de servicio, fotos), evaluar si
+  vale la pena sumar un navegador headless u otra fuente de datos más
+  adelante, o directamente dejarlos como limitación conocida de la
+  auditoría automática.

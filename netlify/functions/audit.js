@@ -4,7 +4,10 @@
  * Netlify Function: auditoría real de una ficha de Google Maps
  * -----------------------------------------------------------------
  * Se llama vía POST /api/audit (redirect definido en netlify.toml
- * hacia /.netlify/functions/audit) con body { url }.
+ * hacia /.netlify/functions/audit) con body { url, rubro }. `rubro` es
+ * opcional: es el texto que el dueño tipea en el formulario ("cerrajería",
+ * "plomería", etc.) y solo lo usa el check "categoria" (ver más abajo) —
+ * sin él, ese check igual corre, pero con una verificación más débil.
  *
  * HISTORIAL: la primera versión de esto traía el HTML público de la
  * ficha y buscaba patrones de texto (og:description, "Horario de
@@ -33,24 +36,43 @@
  * scraping directo, acá SÍ es JSON estructurado y documentado, pero
  * ojo: no todos los campos existen para todos los rubros de negocio):
  *
- *   - Categoría, categorías secundarias, sitio web, descripción,
- *     horarios y reseñas: vienen directo de campos de la API
- *     (type/types, website, description, hours, reviews). Son los
- *     más confiables.
+ *   - Sitio web (una vez identificado) y reseñas: vienen directo de
+ *     campos de la API (website, reviews, rating) y son los más
+ *     confiables.
+ *   - Categoría, categorías secundarias, horarios, descripción y
+ *     atributos: vienen de campos de la API (type/types, hours,
+ *     description, service_options), pero con algo de heurística
+ *     propia arriba (ver el criterio de cada check más abajo) — no
+ *     alcanza con que el campo "exista", miramos si dice algo bueno.
  *   - Atributos (delivery / retiro en el local / etc.): vienen de
  *     `service_options`, que Google solo carga para ciertos rubros
  *     (gastronomía, sobre todo). Para un electricista o un plomero,
  *     por ejemplo, puede no venir y el punto va a marcar "falta"
  *     aunque no aplique realmente.
- *   - Fotos: solo podemos confirmar "¿hay al menos una foto de
- *     portada?" (campo `thumbnail`). Cantidad real y si están
- *     actualizadas NO se puede saber sin una llamada aparte (y paga)
- *     a la API de fotos de SerpApi.
- *   - WhatsApp, publicaciones (posts), área de servicio y preguntas
- *     y respuestas: SerpApi no expone estos datos en la respuesta
- *     básica de Google Maps (en el caso de WhatsApp, ademas, ni
- *     siquiera es un campo público real de Maps). Van a marcar
- *     "falta" casi siempre — limitación conocida, no un bug.
+ *   - WhatsApp, publicaciones (posts), área de servicio, preguntas y
+ *     respuestas, y fotos: se sacaron del checklist. SerpApi no
+ *     expone estos datos en la respuesta básica de Google Maps (en
+ *     el caso de WhatsApp, además, ni siquiera es un campo público
+ *     real de Maps; en el de fotos, el único campo disponible es
+ *     `thumbnail` — sí/no hay foto de portada, sin fecha ni cantidad,
+ *     así que no se puede evaluar "actualizadas"). Auditarlos daba
+ *     "falta" casi siempre, tuviera o no la ficha eso resuelto — no
+ *     era una auditoría real, era ruido. Se reincorporan si en algún
+ *     momento se paga la llamada aparte a la API de fotos de SerpApi
+ *     o se suma otra fuente de datos para el resto.
+ *
+ * Dos checks hacen trabajo extra sobre lo que devuelve SerpApi:
+ *   - "categoria" no se conforma con que `type` no esté vacío: marca
+ *     mal si es una categoría "cajón de sastre" que Google usa cuando
+ *     nadie configuró una específica, y si el usuario declaró su
+ *     rubro en el formulario, exige que la categoría coincida
+ *     razonablemente con ese rubro (ver GENERIC_CATEGORY_NAMES y
+ *     rubroMatchesCategory).
+ *   - "web" no se conforma con que `website` no esté vacío: le hace
+ *     un fetch aparte para confirmar que responde. Esto agrega
+ *     latencia (hasta WEBSITE_FETCH_TIMEOUT_MS) y puede dar falso
+ *     negativo si ese sitio bloquea peticiones automáticas — un
+ *     trade-off aceptado a propósito (ver checkWebsiteReachable).
  *
  * El campo `debug` es TEMPORAL, para calibrar estos mapeos contra
  * datos reales sin tener que ir a buscar logs. Se puede apagar
@@ -66,62 +88,213 @@ const FETCH_TIMEOUT_MS = 9000;
 const SERPAPI_ENDPOINT = "https://serpapi.com/search.json";
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const MAX_RUBRO_LENGTH = 80;
+
+// Timeout para el fetch aparte que hace el check "web" contra el sitio del
+// negocio (no contra SerpApi/Google). Corto a propósito: si el sitio tarda
+// más que esto en responder, lo tratamos igual que si no respondiera — ver
+// checkWebsiteReachable más abajo.
+const WEBSITE_FETCH_TIMEOUT_MS = 4500;
 
 // Errores "esperables" (config faltante, link no identificable, etc.)
 // que queremos mostrar tal cual al usuario, sin genérico "502".
 class UserError extends Error {}
 
+// Rubros donde "abierto las 24 horas" es un dato real y esperable, no un
+// horario mal cargado. Fuera de esta lista, 24hs se trata como señal
+// sospechosa (ver check "horarios" más abajo).
+const EMERGENCY_RUBRO_PATTERNS = [
+  /cerrajer/i,
+  /gr[uú]a/i,
+  /auxilio mec[aá]nico/i,
+  /plomer[oía]{0,2}.{0,15}urgencia|plomer[oa].{0,5}24/i,
+  /electricista.{0,15}urgencia|electricista.{0,5}24/i,
+  /farmacia.{0,15}turno/i,
+  /gomer[ií]a/i,
+  /ambulancia/i,
+  /emergencias? m[eé]dicas?/i,
+  /veterinaria.{0,15}urgencia/i,
+  /\bhotel(es)?\b/i,
+  /seguridad|vigilancia/i,
+  /locksmith/i,
+  /towing/i,
+];
+
+// Frases que indican que la ficha figura abierta las 24 horas. Se buscan
+// dentro de un volcado en texto de lo que venga en `hours` (no sabemos el
+// formato exacto que usa SerpApi para cada rubro, así que en vez de asumir
+// una forma fija convertimos a texto y buscamos el patrón — best-effort).
+const OPEN_24H_PATTERNS = [
+  /abiert[oa].{0,20}24\s?(horas|hs)/i,
+  /atenci[oó]n.{0,20}24\s?(horas|hs)/i,
+  /24\s?(horas|hs).{0,20}(al d[ií]a|los 7 d[ií]as|todos los d[ií]as)/i,
+  /24\/7/,
+  /open 24 hours/i,
+];
+
+// Categorías "cajón de sastre" que Google le pone a una ficha cuando el
+// dueño nunca configuró una categoría específica. Si `type` es una de
+// estas, tratamos la ficha como si tuviera la categoría mal cargada,
+// aunque técnicamente "haya algo cargado". Comparación siempre contra
+// texto normalizado (ver normalizeText).
+const GENERIC_CATEGORY_NAMES = [
+  "punto de interes",
+  "establecimiento",
+  "negocio local",
+  "point of interest",
+  "negocio",
+  "tienda",
+  "lugar",
+  "place",
+  "establishment",
+];
+
+// Palabras muy comunes en español que no aportan nada al detectar
+// "relleno de palabras clave" en una descripción — las ignoramos al buscar
+// una palabra sospechosamente repetida (ver detectDescriptionSpam).
+const SPAM_STOPWORDS = new Set([
+  "para",
+  "con",
+  "los",
+  "las",
+  "del",
+  "una",
+  "uno",
+  "unos",
+  "unas",
+  "mas",
+  "que",
+  "por",
+  "este",
+  "esta",
+  "estos",
+  "estas",
+  "son",
+  "fue",
+  "ser",
+  "estar",
+  "tiene",
+  "tienen",
+  "todo",
+  "toda",
+  "todos",
+  "todas",
+  "somos",
+  "como",
+  "donde",
+  "cuando",
+  "desde",
+  "hasta",
+  "entre",
+  "sobre",
+  "tambien",
+  "nuestra",
+  "nuestro",
+  "nuestros",
+  "nuestras",
+]);
+
 // ---------------------------------------------------------------
-// Definición única de los 13 puntos: cada uno sabe evaluarse (ok) y
-// explicar en criollo qué campo miró y qué encontró (detail), a
+// Definición única de los puntos que se auditan: cada uno sabe evaluarse
+// (ok) y explicar en criollo qué campo miró y qué encontró (detail), a
 // partir de un mismo `ctx` armado una sola vez por auditoría.
 // ---------------------------------------------------------------
 const CHECK_DEFINITIONS = [
   {
-    id: "fotos",
-    title: "Fotos actualizadas",
-    ok: (ctx) => Boolean(ctx.thumbnail),
-    detail: (ctx) =>
-      `Miramos si la ficha tiene foto de portada (\`thumbnail\`). ${ctx.thumbnail ? "Sí tiene." : "No vino ninguna."} Ojo: con esto no podemos confirmar cuántas fotos hay ni si están actualizadas, solo si hay al menos una.`,
-  },
-  {
     id: "horarios",
     title: "Horarios completos",
-    ok: (ctx) => ctx.hoursDayCount >= 5,
-    detail: (ctx) =>
-      `Contamos cuántos días tienen horario cargado en el campo \`hours\`. Encontrados: ${ctx.hoursDayCount} de 7 días (hace falta 5 o más).`,
+    // Si la ficha figura abierta las 24 horas y el rubro no es de los que
+    // realmente funcionan así (emergencias, hotelería, etc.), es casi
+    // siempre un horario mal cargado, no disponibilidad real — lo marcamos
+    // mal directamente, sin mirar el resto de las señales de "horario
+    // completo".
+    ok: (ctx) => {
+      if (ctx.hasOpen24h && !ctx.isEmergencyRubro) return false;
+      return ctx.hoursDayCount >= 5;
+    },
+    detail: (ctx) => {
+      if (ctx.hasOpen24h && !ctx.isEmergencyRubro) {
+        return `Detectamos en el campo \`hours\` que la ficha figura abierta las 24 horas, pero el rubro no parece ser de los que justifican ese horario (emergencias, hotelería, seguridad, etc.). Lo tratamos como horario mal cargado → "mal".`;
+      }
+      const rubroNote = ctx.hasOpen24h && ctx.isEmergencyRubro ? " (24hs detectado, pero el rubro sí lo justifica)" : "";
+      return `Contamos cuántos días tienen horario cargado en el campo \`hours\`. Encontrados: ${ctx.hoursDayCount} de 7 días (hace falta 5 o más)${rubroNote}.`;
+    },
   },
   {
     id: "categoria",
     title: "Categoría correcta",
-    ok: (ctx) => Boolean(ctx.primaryType),
-    detail: (ctx) =>
-      `Categoría principal que devuelve la API: ${ctx.primaryType ? `"${ctx.primaryType}"` : "(no vino ninguna)"}.`,
+    // No alcanza con que `type` no esté vacío: si Google le puso a la
+    // ficha una categoría "cajón de sastre" (Establecimiento, Punto de
+    // interés, etc.) es como si no tuviera categoría específica → mal. Y
+    // si el usuario nos dijo su rubro al auditar, exigimos que la
+    // categoría coincida con ese rubro (comparación por palabra, no
+    // exacta — ver rubroMatchesCategory).
+    ok: (ctx) => {
+      if (!ctx.primaryType) return false;
+      if (ctx.isGenericCategory) return false;
+      if (ctx.declaredRubro && ctx.categoryMatchesRubro === false) return false;
+      return true;
+    },
+    detail: (ctx) => {
+      if (!ctx.primaryType) {
+        return `Campo \`type\` de la API: vacío. Sin categoría, marcamos "mal".`;
+      }
+      if (ctx.isGenericCategory) {
+        return `Categoría principal: "${ctx.primaryType}" — es una categoría genérica que Google usa cuando no hay una específica configurada. Se trata como "mal".`;
+      }
+      if (ctx.declaredRubro) {
+        return ctx.categoryMatchesRubro
+          ? `Categoría principal: "${ctx.primaryType}". Coincide razonablemente con el rubro declarado ("${ctx.declaredRubro}").`
+          : `Categoría principal: "${ctx.primaryType}". NO coincide con el rubro declarado ("${ctx.declaredRubro}") → "mal".`;
+      }
+      return `Categoría principal: "${ctx.primaryType}" (específica, no genérica). No se declaró un rubro para comparar, así que no exigimos coincidencia exacta.`;
+    },
   },
   {
     id: "web",
     title: "Web cargada",
-    ok: (ctx) => Boolean(ctx.website),
-    detail: (ctx) => `Campo \`website\`: ${ctx.website ? ctx.website : "(vacío)"}.`,
-  },
-  {
-    id: "whatsapp",
-    title: "WhatsApp cargado",
-    ok: (ctx) => ctx.website.includes("wa.me") || ctx.website.includes("whatsapp"),
-    detail: () =>
-      `Buscamos "wa.me" o "whatsapp" dentro del campo \`website\`. Google Maps no tiene un campo público de WhatsApp propiamente dicho, así que este punto casi siempre va a dar "falta" aunque el negocio sí tenga WhatsApp.`,
-  },
-  {
-    id: "publicaciones",
-    title: "Publicaciones activas",
-    ok: () => false,
-    detail: () => `SerpApi no expone publicaciones (posts) en la respuesta básica de Google Maps. No podemos verificar este punto con el proveedor actual.`,
+    // No alcanza con que `website` no esté vacío: si el sitio no responde
+    // (caído, dominio vencido, 404), es una ficha con "web rota", no con
+    // web cargada. ctx.websiteCheck se completa con un fetch aparte hecho
+    // en el handler (no acá, porque ok()/detail() son síncronas) — ver
+    // checkWebsiteReachable.
+    ok: (ctx) => Boolean(ctx.website) && ctx.websiteCheck.attempted && ctx.websiteCheck.reachable === true,
+    detail: (ctx) => {
+      if (!ctx.website) return `Campo \`website\`: (vacío).`;
+      if (!ctx.websiteCheck.attempted) return `Campo \`website\`: ${ctx.website}. No llegamos a verificar si responde.`;
+      if (ctx.websiteCheck.reachable) {
+        return `Campo \`website\`: ${ctx.website}. Respondió correctamente (status ${ctx.websiteCheck.status}).`;
+      }
+      const reason = ctx.websiteCheck.error ? `error de red/timeout: ${ctx.websiteCheck.error}` : `respondió con status ${ctx.websiteCheck.status}`;
+      return `Campo \`website\`: ${ctx.website}. No pudimos confirmar que esté vivo (${reason}). Ojo: puede ser un falso negativo si ese sitio bloquea peticiones automáticas.`;
+    },
   },
   {
     id: "descripcion",
     title: "Descripción del negocio completa",
-    ok: (ctx) => ctx.description.length >= 60,
-    detail: (ctx) => `Campo \`description\`, largo: ${ctx.description.length} caracteres (hace falta 60 o más).`,
+    // Además del largo mínimo, buscamos señales de mala calidad en el
+    // campo `description`: teléfono o URL metidos en el texto (prohibido
+    // por las políticas de Google) o una palabra que se repite de forma
+    // sospechosa (relleno de palabras clave). Cualquiera de esas señales
+    // tira el check a "mal" aunque cumpla el largo.
+    ok: (ctx) => {
+      const longEnough = ctx.description.length >= 60;
+      const spam = ctx.descriptionSpam.hasPhone || ctx.descriptionSpam.hasUrl || ctx.descriptionSpam.hasRepeatedWord;
+      return longEnough && !spam;
+    },
+    detail: (ctx) => {
+      const lengthPart = `Campo \`description\`, largo: ${ctx.description.length} caracteres (hace falta 60 o más).`;
+      const flags = [];
+      if (ctx.descriptionSpam.hasPhone) flags.push("parece tener un teléfono adentro del texto");
+      if (ctx.descriptionSpam.hasUrl) flags.push("parece tener una URL adentro del texto");
+      if (ctx.descriptionSpam.hasRepeatedWord) {
+        flags.push(
+          `la palabra "${ctx.descriptionSpam.repeatedWord.word}" se repite ${ctx.descriptionSpam.repeatedWord.count} veces (posible relleno de palabras clave)`
+        );
+      }
+      if (flags.length === 0) return `${lengthPart} No detectamos señales de relleno o spam.`;
+      return `${lengthPart} Detectamos señales de mala calidad: ${flags.join("; ")}. Google prohíbe teléfonos/URLs en la descripción, y el relleno de palabras clave perjudica más de lo que ayuda.`;
+    },
   },
   {
     id: "servicios",
@@ -133,15 +306,9 @@ const CHECK_DEFINITIONS = [
   {
     id: "categorias-secundarias",
     title: "Categorías secundarias",
-    ok: (ctx) => ctx.types.length > 1,
+    ok: (ctx) => ctx.types.length >= 3,
     detail: (ctx) =>
-      `Campo \`types\` (todas las categorías): ${ctx.types.length ? ctx.types.join(", ") : "(vacío)"} — ${ctx.types.length} en total (hace falta más de 1).`,
-  },
-  {
-    id: "area-servicio",
-    title: "Área de servicio configurada",
-    ok: (ctx) => ctx.hasServiceArea,
-    detail: () => `SerpApi no expone directamente si hay un "área de servicio" configurada. Best-effort: casi siempre va a dar "falta".`,
+      `Campo \`types\` (todas las categorías): ${ctx.types.length ? ctx.types.join(", ") : "(vacío)"} — ${ctx.types.length} en total (hace falta 3 o más: principal + al menos 2 secundarias).`,
   },
   {
     id: "atributos",
@@ -151,17 +318,28 @@ const CHECK_DEFINITIONS = [
       `Campo \`service_options\` (delivery / para llevar / servir en el local, etc.). Activos: ${ctx.serviceOptionHits.length ? ctx.serviceOptionHits.join(", ") : "ninguno"}. Google solo carga este campo para algunos rubros (gastronomía sobre todo) — para otros rubros puede no aplicar.`,
   },
   {
-    id: "preguntas-respuestas",
-    title: "Preguntas y respuestas",
-    ok: () => false,
-    detail: () => `SerpApi no expone preguntas y respuestas en la respuesta básica de Google Maps. No podemos verificar este punto con el proveedor actual.`,
-  },
-  {
     id: "resenas",
     title: "Reseñas",
-    ok: (ctx) => ctx.reviews !== null && ctx.reviews >= 5,
-    detail: (ctx) =>
-      `Campo \`reviews\`: ${ctx.reviews !== null ? ctx.reviews : "(no vino)"} (hace falta 5 o más). No podemos verificar automáticamente si el negocio responde a las reseñas.`,
+    // No alcanza con "tener reseñas": exigimos volumen (>30) y buen
+    // promedio (4.2+). Si no llega al volumen, es "mal" sin importar el
+    // promedio. Si el volumen está bien pero no vino el promedio, le
+    // damos el beneficio de la duda y lo dejamos en "bien" en vez de
+    // penalizar por un dato que no pudimos leer.
+    ok: (ctx) => {
+      const countOk = ctx.reviews !== null && ctx.reviews > 30;
+      if (!countOk) return false;
+      if (ctx.rating === null) return true;
+      return ctx.rating >= 4.2;
+    },
+    detail: (ctx) => {
+      const countPart = `Campo \`reviews\`: ${ctx.reviews !== null ? ctx.reviews : "(no vino)"} (hace falta más de 30).`;
+      const countOk = ctx.reviews !== null && ctx.reviews > 30;
+      if (!countOk) return `${countPart} No llega al volumen mínimo → "mal", sin mirar el promedio.`;
+      if (ctx.rating === null) {
+        return `${countPart} Cumple el volumen. No vino el campo \`rating\`, así que por buena fe lo dejamos en "bien".`;
+      }
+      return `${countPart} Cumple el volumen. Promedio (\`rating\`): ${ctx.rating} (hace falta 4.2 o más).`;
+    },
   },
 ];
 
@@ -178,6 +356,7 @@ exports.handler = async (event) => {
   }
 
   const url = typeof payload.url === "string" ? payload.url.trim() : "";
+  const rubro = typeof payload.rubro === "string" ? payload.rubro.trim().slice(0, MAX_RUBRO_LENGTH) : "";
 
   if (!url || !ALLOWED_URL_PATTERN.test(url)) {
     return jsonResponse(400, {
@@ -194,7 +373,24 @@ exports.handler = async (event) => {
       throw new UserError("No encontramos la ficha con ese link. Probá copiarlo de nuevo desde \"Compartir\" en Google Maps.");
     }
 
-    const ctx = buildContext(place);
+    const ctx = buildContext(place, rubro);
+
+    // El check "web" necesita confirmar que el sitio responde, y eso
+    // implica un fetch de red aparte del que ya le hicimos a SerpApi — no
+    // podemos hacerlo dentro de buildContext (síncrona) ni dentro de
+    // def.ok() (los CHECK_DEFINITIONS son todos síncronos por diseño).
+    // Lo resolvemos acá y lo colgamos de ctx.websiteCheck.
+    ctx.websiteCheck = { attempted: false, reachable: null, status: null, error: null };
+    if (ctx.website) {
+      let result;
+      try {
+        result = await checkWebsiteReachable(ctx.website);
+      } catch (err) {
+        result = { reachable: false, status: null, error: String(err && err.message ? err.message : err) };
+      }
+      ctx.websiteCheck = { ...result, attempted: true };
+    }
+
     const checks = {};
     const debugPoints = [];
 
@@ -432,7 +628,7 @@ function firstDefined(obj, keys) {
   return undefined;
 }
 
-function buildContext(place) {
+function buildContext(place, rubro) {
   // OJO (confirmado con una respuesta real de SerpApi): el campo
   // `type` viene como ARRAY con TODAS las categorías de la ficha
   // (ej. `type: ["Instalador de gas"]`), no como string suelto — y
@@ -475,22 +671,136 @@ function buildContext(place) {
       ? parseInt(reviewsRaw.replace(/\D/g, ""), 10)
       : null;
 
+  const ratingRaw = firstDefined(place, ["rating", "average_rating", "stars", "rating_value"]);
+  const rating =
+    typeof ratingRaw === "number"
+      ? ratingRaw
+      : typeof ratingRaw === "string"
+      ? parseFloat(ratingRaw.replace(",", "."))
+      : null;
+
   const websiteRaw = firstDefined(place, ["website", "link", "site"]);
   const descriptionRaw = firstDefined(place, ["description", "about", "editorial_summary"]);
-  const thumbnailRaw = firstDefined(place, ["thumbnail", "photo", "image", "main_image"]);
+
+  const primaryType = types[0] || "";
+  const declaredRubro = rubro || "";
+  const isGenericCategory = isGenericCategoryName(primaryType);
+  const categoryMatchesRubro =
+    declaredRubro && primaryType && !isGenericCategory ? rubroMatchesCategory(declaredRubro, primaryType) : null;
+
+  // No sabemos con certeza el formato exacto de `hours` para todos los
+  // rubros (ver comentario arriba sobre `type`), así que en vez de asumir
+  // una forma fija lo volcamos a texto y buscamos el patrón de "24 horas"
+  // ahí adentro — mismo espíritu best-effort que el resto de los campos
+  // no confirmados contra una respuesta real.
+  const hoursBlob = safeJsonPreview(hours, 4000);
+  const hasOpen24h = OPEN_24H_PATTERNS.some((re) => re.test(hoursBlob));
+  const rubroBlob = [primaryType, ...types, declaredRubro].filter(Boolean).join(" ");
+  const isEmergencyRubro = EMERGENCY_RUBRO_PATTERNS.some((re) => re.test(rubroBlob));
 
   return {
-    primaryType: types[0] || "",
+    primaryType,
     types,
     hoursDayCount,
+    hasOpen24h,
+    isEmergencyRubro,
+    declaredRubro,
+    isGenericCategory,
+    categoryMatchesRubro,
     website: typeof websiteRaw === "string" ? websiteRaw : "",
     description: typeof descriptionRaw === "string" ? descriptionRaw : "",
-    thumbnail: typeof thumbnailRaw === "string" ? thumbnailRaw : "",
+    descriptionSpam: detectDescriptionSpam(typeof descriptionRaw === "string" ? descriptionRaw : ""),
     serviceOptionHits,
     hasMenuOrProducts: Boolean(place.menu || place.products),
-    hasServiceArea: Boolean(place.service_area || place.serves_area),
     reviews: Number.isFinite(reviews) ? reviews : null,
+    rating: Number.isFinite(rating) ? rating : null,
   };
+}
+
+function isGenericCategoryName(categoryText) {
+  if (!categoryText) return false;
+  return GENERIC_CATEGORY_NAMES.includes(normalizeText(categoryText));
+}
+
+// Compara el rubro que declaró el usuario contra la categoría detectada.
+// No exigimos coincidencia exacta (plomería/plomero, cerrajería/cerrajero)
+// — comparamos por prefijo de cada palabra relevante, una forma simple de
+// tolerar variaciones de género/número típicas del español.
+function rubroMatchesCategory(rubro, categoryText) {
+  const rubroNorm = normalizeText(rubro);
+  const categoryNorm = normalizeText(categoryText);
+  if (!rubroNorm || !categoryNorm) return null;
+  if (rubroNorm.includes(categoryNorm) || categoryNorm.includes(rubroNorm)) return true;
+
+  const rubroWords = rubroNorm.split(" ").filter((w) => w.length >= 4);
+  const categoryWords = categoryNorm.split(" ").filter((w) => w.length >= 4);
+  return rubroWords.some((rw) => categoryWords.some((cw) => wordsShareStem(rw, cw)));
+}
+
+function wordsShareStem(a, b) {
+  const prefixLen = Math.min(6, a.length, b.length);
+  if (prefixLen < 4) return a === b;
+  return a.slice(0, prefixLen) === b.slice(0, prefixLen);
+}
+
+function normalizeText(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // saca acentos
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Busca señales de mala calidad en la descripción: teléfono o URL metidos
+// en el texto (prohibido por las políticas de Google para esta sección) o
+// una palabra de contenido que se repite mucho más de lo esperable (relleno
+// de palabras clave, otra práctica que Google penaliza).
+function detectDescriptionSpam(text) {
+  if (!text) return { hasPhone: false, hasUrl: false, hasRepeatedWord: false, repeatedWord: null };
+
+  const hasPhone = /(\+?\d[\d\s.()-]{6,}\d)/.test(text);
+  const hasUrl = /https?:\/\/|www\.|\.(com|com\.ar|net|ar)\b/i.test(text);
+
+  const words = normalizeText(text)
+    .split(" ")
+    .filter((w) => w.length >= 4 && !SPAM_STOPWORDS.has(w));
+
+  let repeatedWord = null;
+  if (words.length > 0) {
+    const freq = {};
+    words.forEach((w) => {
+      freq[w] = (freq[w] || 0) + 1;
+    });
+    const [topWord, topCount] = Object.entries(freq).sort((a, b) => b[1] - a[1])[0];
+    if (topCount >= 4) repeatedWord = { word: topWord, count: topCount };
+  }
+
+  return { hasPhone, hasUrl, hasRepeatedWord: repeatedWord !== null, repeatedWord };
+}
+
+// Fetch aparte (no a SerpApi/Google) para confirmar que el sitio web
+// cargado en la ficha efectivamente responde. Ver comentario de
+// WEBSITE_FETCH_TIMEOUT_MS sobre el trade-off de latencia/falsos
+// negativos que esto acepta a propósito.
+async function checkWebsiteReachable(url) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), WEBSITE_FETCH_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: controller.signal,
+      headers: { "User-Agent": BROWSER_UA },
+    });
+    return { reachable: response.ok, status: response.status, error: null };
+  } catch (err) {
+    return { reachable: false, status: null, error: String(err && err.message ? err.message : err) };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function safe(fn) {
@@ -499,11 +809,6 @@ function safe(fn) {
   } catch {
     return false;
   }
-}
-
-function matchFirst(text, regex) {
-  const m = text.match(regex);
-  return m ? m[1] : "";
 }
 
 function safeJsonPreview(obj, maxLen) {

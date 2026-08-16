@@ -32,18 +32,31 @@
         </p>
 
         <form id="audit-form" class="audit-form" novalidate>
-          <label for="gmb-url" class="visually-hidden">Link de tu ficha de Google Maps</label>
-          <input
-            type="text"
-            id="gmb-url"
-            name="gmb-url"
-            placeholder="Pegá acá el link de tu ficha de Google Maps…"
-            autocomplete="off"
-            inputmode="url"
-          />
-          <button type="submit" id="audit-btn" class="btn btn-primary">
-            <span class="btn-label">Auditar mi ficha</span>
-          </button>
+          <div class="audit-form-rubro">
+            <label for="gmb-rubro">Rubro de tu negocio <span class="optional-tag">(opcional)</span></label>
+            <input
+              type="text"
+              id="gmb-rubro"
+              name="gmb-rubro"
+              placeholder="Ej: cerrajería, plomería, restaurante…"
+              autocomplete="off"
+            />
+            <p class="field-hint">Nos ayuda a chequear si Google te asignó bien la categoría en tu ficha.</p>
+          </div>
+          <div class="audit-form-row">
+            <label for="gmb-url" class="visually-hidden">Link de tu ficha de Google Maps</label>
+            <input
+              type="text"
+              id="gmb-url"
+              name="gmb-url"
+              placeholder="Pegá acá el link de tu ficha de Google Maps…"
+              autocomplete="off"
+              inputmode="url"
+            />
+            <button type="submit" id="audit-btn" class="btn btn-primary">
+              <span class="btn-label">Auditar mi ficha</span>
+            </button>
+          </div>
         </form>
         <p id="form-error" class="form-error" role="alert" aria-live="polite"></p>
 

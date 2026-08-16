@@ -132,13 +132,63 @@ body {
 .audit-form {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 16px;
   max-width: 560px;
   margin: 0 auto;
 }
 
+.audit-form-rubro {
+  text-align: left;
+}
+
+.audit-form-rubro label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 6px;
+}
+
+.optional-tag {
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+
+.field-hint {
+  margin: 6px 0 0;
+  font-size: 0.78rem;
+  color: var(--color-text-muted);
+}
+
+#gmb-rubro {
+  width: 100%;
+  padding: 12px 16px;
+  font-size: 0.95rem;
+  border: 1.5px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface);
+  color: var(--color-text);
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+#gmb-rubro::placeholder {
+  color: #9aa3b5;
+}
+
+#gmb-rubro:focus {
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 4px rgba(26, 115, 232, 0.15);
+}
+
+.audit-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 @media (min-width: 560px) {
-  .audit-form {
+  .audit-form-row {
     flex-direction: row;
   }
 }
