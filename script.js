@@ -3,15 +3,15 @@
    -----------------------------------------------------------
    La auditoría lee la ficha real de Google Maps a través de la
    Netlify Function en /api/audit (ver netlify/functions/audit.js).
-   Esa function trae el HTML público de la ficha y devuelve, para
-   cada punto del checklist, si lo detectó o no: { checks: { <id>:
+   Esa function consulta SerpApi (un proveedor externo que expone
+   los datos de Maps como JSON estructurado) y devuelve, para cada
+   punto del checklist, si lo detectó o no: { checks: { <id>:
    boolean, ... } }. Acá solo pedimos ese resultado y lo cruzamos
    con CHECKLIST_DEFINITION (que tiene los títulos y textos).
 
-   Como es lectura de la página pública sin API oficial, puede
-   fallar o quedar desactualizada si Google cambia el diseño de la
-   página — el detalle de qué tan confiable es cada punto está
-   documentado en netlify/functions/audit.js.
+   El detalle de qué tan confiable es cada punto —y qué campo de
+   SerpApi mira cada uno— está documentado en
+   netlify/functions/audit.js.
    ========================================================= */
 
 (function () {
@@ -19,48 +19,37 @@
 
   // ---- Definición de los puntos que se auditan -------------
   // Cada item tiene lo que se muestra cuando está OK y cuando falta.
+  //
+  // Ojo: son 8 puntos, no 13. Se sacaron whatsapp, publicaciones,
+  // área de servicio, preguntas y respuestas, y fotos porque SerpApi
+  // (el proveedor de datos actual, ver netlify/functions/audit.js) no
+  // expone un dato confiable detrás de ninguno de esos — auditarlos
+  // daba "falta" casi siempre, tuviera o no la ficha eso resuelto. No
+  // era una auditoría real, era ruido.
   const CHECKLIST_DEFINITION = [
-    {
-      id: "fotos",
-      title: "Fotos actualizadas",
-      okDesc: "Tu ficha tiene fotos recientes que muestran bien el negocio.",
-      failDesc: "No se ven fotos recientes. Las fichas con fotos actuales generan más confianza y clics.",
-    },
     {
       id: "horarios",
       title: "Horarios completos",
       okDesc: "Los horarios de atención están cargados y completos.",
-      failDesc: "Faltan horarios o están incompletos. Sin horarios, Google puede mostrar tu negocio como \"cerrado\" por error.",
+      failDesc: "Faltan horarios, están incompletos, o figura \"abierto las 24 horas\" sin ser un rubro de emergencia (probable horario mal cargado). Sin horarios correctos, Google puede mostrar tu negocio como \"cerrado\" por error o confundir al cliente.",
     },
     {
       id: "categoria",
       title: "Categoría correcta",
-      okDesc: "La categoría principal describe bien tu rubro.",
-      failDesc: "La categoría no está bien definida. Una categoría incorrecta te hace perder búsquedas de clientes.",
+      okDesc: "Tenés una categoría específica cargada (no una genérica) y coincide con tu rubro.",
+      failDesc: "Tu categoría está vacía, es genérica (\"Establecimiento\", \"Punto de interés\") o no coincide con tu rubro. Una categoría mal cargada te hace perder búsquedas de clientes.",
     },
     {
       id: "web",
       title: "Web cargada",
-      okDesc: "El link a tu sitio web está cargado en la ficha.",
-      failDesc: "No hay un sitio web cargado. Es una oportunidad perdida de llevar tráfico fuera de Maps.",
-    },
-    {
-      id: "whatsapp",
-      title: "WhatsApp cargado",
-      okDesc: "Tenés un link directo de WhatsApp para que te contacten.",
-      failDesc: "No hay un link directo de WhatsApp. Muchos clientes prefieren escribir antes que llamar.",
-    },
-    {
-      id: "publicaciones",
-      title: "Publicaciones activas",
-      okDesc: "Estás publicando novedades con cierta frecuencia.",
-      failDesc: "No hay publicaciones recientes. Las publicaciones activas ayudan a aparecer más arriba en las búsquedas.",
+      okDesc: "El link a tu sitio web está cargado y confirmamos que responde.",
+      failDesc: "No hay un sitio web cargado, o el link que tenés no responde (puede estar caído o vencido). Es una oportunidad perdida de llevar tráfico fuera de Maps.",
     },
     {
       id: "descripcion",
       title: "Descripción del negocio completa",
-      okDesc: "La descripción está completa y usa palabras clave de tu rubro.",
-      failDesc: "Falta o es muy pobre la descripción. Sin palabras clave del rubro, Google tiene menos pistas para mostrarte en las búsquedas correctas.",
+      okDesc: "La descripción tiene buen largo y no muestra señales de relleno o spam.",
+      failDesc: "Falta o es muy pobre la descripción, o tiene señales de mala calidad (teléfono/URL en el texto, palabra repetida en exceso). Eso le da a Google menos (o peores) pistas para mostrarte en las búsquedas correctas.",
     },
     {
       id: "servicios",
@@ -71,14 +60,8 @@
     {
       id: "categorias-secundarias",
       title: "Categorías secundarias",
-      okDesc: "Además de la principal, sumaste categorías secundarias que amplían tu alcance.",
-      failDesc: "Solo tenés la categoría principal. Sumar categorías secundarias te hace aparecer en más búsquedas relacionadas.",
-    },
-    {
-      id: "area-servicio",
-      title: "Área de servicio configurada",
-      okDesc: "El área donde atendés está bien configurada.",
-      failDesc: "No hay un área de servicio configurada. Si trabajás fuera de tu local (a domicilio, por zona), Google necesita saberlo para mostrarte a esos clientes.",
+      okDesc: "Además de la principal, sumaste dos o más categorías secundarias que amplían tu alcance.",
+      failDesc: "Tenés solo la categoría principal (o una sola secundaria). Sumar más categorías relacionadas te hace aparecer en más búsquedas.",
     },
     {
       id: "atributos",
@@ -87,22 +70,17 @@
       failDesc: "Faltan atributos como accesibilidad, delivery o retiro en local. Son filtros que los clientes usan para elegir entre varios negocios.",
     },
     {
-      id: "preguntas-respuestas",
-      title: "Preguntas y respuestas",
-      okDesc: "Respondés las preguntas que dejan los usuarios en tu ficha.",
-      failDesc: "Hay preguntas sin responder. Dejarlas así puede llevar a que otro usuario responda mal en tu lugar, o directamente hacer dudar al cliente.",
-    },
-    {
       id: "resenas",
       title: "Reseñas",
-      okDesc: "Tenés buen volumen de reseñas y respondés a las que recibís.",
-      failDesc: "Te faltan reseñas o no estás respondiendo las que ya tenés. Responder reseñas (buenas y malas) mejora la confianza y el posicionamiento.",
+      okDesc: "Tenés más de 30 reseñas con un promedio de 4.2 o más.",
+      failDesc: "Te falta volumen de reseñas (más de 30) o tu promedio está por debajo de 4.2. Ambas cosas pesan en la confianza y el posicionamiento.",
     },
   ];
 
   // ---- Referencias al DOM -----------------------------------
   const form = document.getElementById("audit-form");
   const input = document.getElementById("gmb-url");
+  const rubroInput = document.getElementById("gmb-rubro");
   const formError = document.getElementById("form-error");
   const auditBtn = document.getElementById("audit-btn");
 
@@ -150,11 +128,11 @@
   // La function busca el HTML público de la ficha y devuelve qué
   // puntos detectó. Acá solo cruzamos ese resultado con
   // CHECKLIST_DEFINITION para tener título + texto + ok por punto.
-  async function getAuditResult(url) {
+  async function getAuditResult(url, rubro) {
     const response = await fetch(AUDIT_ENDPOINT, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
+      body: JSON.stringify({ url, rubro }),
     });
 
     let data = null;
@@ -235,10 +213,10 @@
 
   // ---- Detalle técnico (temporal, para diagnóstico) ------------
   // Muestra en texto plano lo que devolvió la Netlify Function en
-  // `debug`: status HTTP, primeros 500 caracteres del HTML recibido,
-  // y qué patrón buscó y encontró cada uno de los 13 puntos. Se arma
-  // con textContent (no innerHTML) porque el HTML de Google puede
-  // traer cualquier cosa ahí adentro y no queremos ni interpretarlo
+  // `debug`: cómo identificamos la ficha, el JSON crudo que mandó
+  // SerpApi, y qué campo miró y qué encontró cada uno de los 8
+  // puntos. Se arma con textContent (no innerHTML) porque ese JSON
+  // puede traer cualquier cosa ahí adentro y no queremos ni interpretarlo
   // ni que rompa el diseño de la página.
   function renderDebugDetails(debug) {
     lastDebugState = debug;
@@ -389,6 +367,7 @@
   form.addEventListener("submit", async function (event) {
     event.preventDefault();
     const url = input.value.trim();
+    const rubro = rubroInput ? rubroInput.value.trim() : "";
 
     input.classList.remove("input-error");
     formError.textContent = "";
@@ -405,7 +384,7 @@
 
     showLoading();
     try {
-      const { checklist, debug } = await getAuditResult(url);
+      const { checklist, debug } = await getAuditResult(url, rubro);
       renderResults(url, checklist, debug);
       showResults();
     } catch (err) {
@@ -427,6 +406,7 @@
   restartBtn.addEventListener("click", function () {
     resultsSection.classList.add("hidden");
     input.value = "";
+    if (rubroInput) rubroInput.value = "";
     input.focus();
     window.scrollTo({ top: 0, behavior: "smooth" });
   });
